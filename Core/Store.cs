@@ -46,6 +46,8 @@ namespace SecHUD
         /// <summary>Where denied startup items are kept so they can be put back.</summary>
         public static string QuarantineDir { get { return Path.Combine(Dir, "removed-autoruns"); } }
         public static string RemovedLogPath { get { return Path.Combine(QuarantineDir, "removed.log"); } }
+        public static string RemovedPath { get { return Path.Combine(QuarantineDir, "removed.json"); } }
+        public static string WindowPath { get { return Path.Combine(Dir, "window.json"); } }
 
         public static void EnsureDir()
         {
@@ -70,6 +72,8 @@ namespace SecHUD
         public static void Save<T>(string path, T value)
         {
             EnsureDir();
+            string folder = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(folder)) Directory.CreateDirectory(folder);
             WriteAtomic(path, Pretty(ToJson(value)) + Environment.NewLine);
         }
 

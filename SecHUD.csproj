@@ -8,7 +8,7 @@
     <LangVersion>7.3</LangVersion>
     <RootNamespace>SecHUD</RootNamespace>
     <AssemblyName>SecHUD</AssemblyName>
-    <Version>0.7.0</Version>
+    <Version>0.8.0</Version>
     <Authors>Ty</Authors>
     <Product>SecHUD</Product>
     <Description>Home network security monitor</Description>
@@ -25,6 +25,11 @@
     <!-- The tests are their own project (tests\SecHUD.Tests.csproj). -->
     <Compile Remove="tests\**" />
     <None Remove="tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The public IEEE list of which maker owns which block of MAC addresses, packed into the exe. -->
+    <EmbeddedResource Include="Data\oui.gz" LogicalName="SecHUD.oui.gz" />
   </ItemGroup>
 
   <ItemGroup>

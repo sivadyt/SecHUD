@@ -38,6 +38,20 @@ namespace SecHUD
         [DataMember(Name = "watchRouter", Order = 20)] public bool WatchRouter { get; set; }
         [DataMember(Name = "checkUpdates", Order = 21)] public bool CheckUpdates { get; set; }
 
+        /// <summary>Watch this PC continuously and react to a change within a second or two.</summary>
+        [DataMember(Name = "liveWatch", Order = 22)] public bool LiveWatch { get; set; }
+
+        /// <summary>How many sweeps in a row a watched device may miss before it counts as offline.</summary>
+        [DataMember(Name = "watchMisses", Order = 23)] public int WatchMisses { get; set; }
+
+        /// <summary>Quiet hours hold back non-urgent Discord alerts and send them as one summary afterwards.</summary>
+        [DataMember(Name = "quietHours", Order = 24)] public bool QuietHours { get; set; }
+        [DataMember(Name = "quietStart", Order = 25)] public string QuietStart { get; set; }
+        [DataMember(Name = "quietEnd", Order = 26)] public string QuietEnd { get; set; }
+
+        /// <summary>False until the first-run welcome has been answered.</summary>
+        [DataMember(Name = "welcomed", Order = 27)] public bool Welcomed { get; set; }
+
         // Secrets are never stored as plain text. These hold DPAPI-encrypted values that only
         // this Windows account can decrypt (see Secrets.cs).
         [DataMember(Name = "proxmoxSecretProtected", Order = 16)] public string ProxmoxSecretProtected { get; set; }
@@ -78,6 +92,12 @@ namespace SecHUD
             HomeWifiName = "";
             WatchRouter = true;
             CheckUpdates = true;
+            LiveWatch = true;
+            WatchMisses = 2;
+            QuietHours = false;
+            QuietStart = "23:00";
+            QuietEnd = "07:00";
+            Welcomed = false;
         }
 
         public static AppConfig CreateDefault()
@@ -103,6 +123,10 @@ namespace SecHUD
             if (ProxmoxSecretProtected == null) ProxmoxSecretProtected = "";
             if (DiscordWebhookProtected == null) DiscordWebhookProtected = "";
             if (HomeWifiName == null) HomeWifiName = "";
+            if (WatchMisses < 1 || WatchMisses > 20) WatchMisses = 2;
+            int minutes;
+            if (!Quiet.TryParseTime(QuietStart, out minutes)) QuietStart = "23:00";
+            if (!Quiet.TryParseTime(QuietEnd, out minutes)) QuietEnd = "07:00";
         }
     }
 
@@ -116,6 +140,13 @@ namespace SecHUD
         [DataMember(Name = "approved", Order = 4)] public bool Approved { get; set; }
         [DataMember(Name = "firstSeen", Order = 5)] public string FirstSeen { get; set; }
         [DataMember(Name = "lastSeen", Order = 6)] public string LastSeen { get; set; }
+
+        /// <summary>A watched device raises an alert when it stops answering.</summary>
+        [DataMember(Name = "watched", Order = 7, EmitDefaultValue = false)] public bool Watched { get; set; }
+        /// <summary>Sweeps in a row this device has not answered.</summary>
+        [DataMember(Name = "missed", Order = 8, EmitDefaultValue = false)] public int Missed { get; set; }
+        /// <summary>True once the offline alert for a watched device has been raised.</summary>
+        [DataMember(Name = "down", Order = 9, EmitDefaultValue = false)] public bool Down { get; set; }
 
         /// <summary>True when the device answered during the latest scan. Not saved.</summary>
         [IgnoreDataMember] public bool Online { get; set; }
@@ -250,6 +281,11 @@ namespace SecHUD
         public RouterSnapshot Router { get; set; }
         public int CustomRuleCount { get; set; }
 
+        /// <summary>True for a live-watch pass: this PC was re-checked, the network part is carried over.</summary>
+        public bool IsQuick { get; set; }
+        /// <summary>Counts up with every pass, so a late result can never overwrite a newer one.</summary>
+        public long Sequence { get; set; }
+
         public ScanResult()
         {
             PcRows = new List<CheckRow>();
@@ -302,6 +338,31 @@ namespace SecHUD
             ExternalIp = "";
             Note = "";
         }
+    }
+
+    /// <summary>A startup item that was denied, kept so it can be put back. Stored in removed.json.</summary>
+    [DataContract]
+    public class RemovedRecord
+    {
+        [DataMember(Name = "id", Order = 1)] public string Id { get; set; }
+        [DataMember(Name = "ts", Order = 2)] public string Ts { get; set; }
+        [DataMember(Name = "kind", Order = 3)] public string Kind { get; set; }
+        [DataMember(Name = "name", Order = 4)] public string Name { get; set; }
+        [DataMember(Name = "command", Order = 5)] public string Command { get; set; }
+        /// <summary>Where the moved startup file or the exported task definition was saved.</summary>
+        [DataMember(Name = "backup", Order = 6)] public string Backup { get; set; }
+        /// <summary>For Run entries: "ExpandString" when the value held %VARIABLES%.</summary>
+        [DataMember(Name = "valueKind", Order = 7)] public string ValueKind { get; set; }
+        [DataMember(Name = "restored", Order = 8)] public bool Restored { get; set; }
+    }
+
+    /// <summary>The window's size, remembered between runs. Stored in window.json.</summary>
+    [DataContract]
+    public class WindowPlacement
+    {
+        [DataMember(Name = "width", Order = 1)] public double Width { get; set; }
+        [DataMember(Name = "height", Order = 2)] public double Height { get; set; }
+        [DataMember(Name = "maximized", Order = 3)] public bool Maximized { get; set; }
     }
 
     [DataContract]

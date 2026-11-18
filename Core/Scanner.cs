@@ -18,10 +18,14 @@ namespace SecHUD
 {
     /// <summary>
     /// The engine. One call to Run does a full pass:
-    ///   1. this PC      - Defender, firewall, failed logins, listening ports
+    ///   1. this PC      - antivirus, firewall, failed logins, listening ports, autoruns, accounts, detections
     ///   2. the LAN      - an ARP sweep of the local subnet, compared with the device baseline
     ///   3. watched hosts - TCP reachability and TLS certificate expiry
     /// and logs an event for anything that changed since the previous pass.
+    ///
+    /// RunQuick is the live-watch pass: it repeats step 1 only (plus the DNS setting, which is
+    /// free to read) and carries the network rows over from the last full pass. It takes about
+    /// a second, so it can run the moment Windows reports a change.
     ///
     /// The only traffic it sends is ARP requests on your own private subnet and a TCP connect
     /// to the hosts listed in config.json. It never needs admin rights.
@@ -29,26 +33,112 @@ namespace SecHUD
     public class Scanner
     {
         private const int MaxHostRows = 8;
+
+        /// <summary>Held while the baselines and state are read, compared and written.</summary>
         private readonly object runLock = new object();
+
+        /// <summary>One full pass at a time. The slow network part runs under this lock only,
+        /// so a live-watch pass never has to wait for an ARP sweep to finish.</summary>
+        private readonly object fullLock = new object();
+
+        private ScanResult lastFull;
+        private int pendingHighEvents;
+        private long sequence;
+
+        /// <summary>What the network part of a full pass found, before it is compared with anything.</summary>
+        private class NetFacts
+        {
+            public AppConfig Config;
+            public LanInfo Lan;
+            public Dictionary<string, string> Found;
+            public WifiScan Wifi;
+            public bool WifiFailed;
+            public RouterSnapshot Router;
+            public List<CheckRow> HostRows = new List<CheckRow>();
+            public ProxmoxSnapshot Proxmox;
+            public string Pinned;
+        }
 
         public ScanResult Run(bool approve)
         {
-            lock (runLock)
+            lock (fullLock)
             {
-                return RunCore(approve);
+                NetFacts facts = Gather(approve);
+                lock (runLock)
+                {
+                    return RunCore(approve, facts);
+                }
             }
         }
 
-        private ScanResult RunCore(bool approve)
+        /// <summary>The live-watch pass. Returns null until the first full pass has finished.</summary>
+        public ScanResult RunQuick()
         {
+            lock (runLock)
+            {
+                if (lastFull == null) return null;
+                return RunCore(false, null);
+            }
+        }
+
+        /// <summary>Everything slow: the sweep, the Wi-Fi survey, the router, the watched hosts, Proxmox.</summary>
+        private NetFacts Gather(bool approve)
+        {
+            var facts = new NetFacts();
+            AppConfig config = Store.LoadConfig();
+            facts.Config = config;
+            AppState state;
+            lock (runLock)
+            {
+                // Read under the lock so a half-written file can never make the Proxmox pin look empty.
+                state = Store.Load<AppState>(Store.StatePath) ?? AppState.CreateDefault();
+            }
+            state.Normalize();
+            DateTime now = DateTime.Now;
+
+            if (config.ScanLan)
+            {
+                try { facts.Lan = FindLan(); } catch { facts.Lan = null; }
+                if (facts.Lan != null) facts.Found = Sweep(facts.Lan);
+            }
+            string gatewayIp = facts.Lan != null && facts.Lan.Gateway != null ? facts.Lan.Gateway.ToString() : null;
+
+            if (config.WatchWifi)
+            {
+                try { facts.Wifi = Wifi.Scan(); } catch { facts.WifiFailed = true; }
+            }
+
+            if (config.WatchRouter)
+            {
+                try { facts.Router = Upnp.Query(gatewayIp); }
+                catch { facts.Router = new RouterSnapshot { Note = "could not query the router" }; }
+            }
+
+            foreach (WatchedHost host in config.WatchedHosts)
+            {
+                if (host == null || string.IsNullOrWhiteSpace(host.Host)) continue;
+                if (facts.HostRows.Count >= MaxHostRows) break;
+                facts.HostRows.Add(CheckHost(host, config, now));
+            }
+
+            // Approving accepts a changed Proxmox certificate: forget the old one so the next one is remembered.
+            facts.Pinned = approve && state.ProxmoxCertChanged ? "" : state.ProxmoxThumbprint;
+            try { facts.Proxmox = Proxmox.Fetch(config, facts.Pinned); }
+            catch { facts.Proxmox = new ProxmoxSnapshot { Configured = true, Error = "error" }; }
+            return facts;
+        }
+
+        private ScanResult RunCore(bool approve, NetFacts facts)
+        {
+            bool quick = facts == null;
             DateTime now = DateTime.Now;
             string stamp = now.ToString("HH:mm");
-            AppConfig config = Store.LoadConfig();
+            AppConfig config = quick ? Store.LoadConfig() : facts.Config;
             AppState state = Store.Load<AppState>(Store.StatePath) ?? AppState.CreateDefault();
             state.Normalize();
 
             var events = new List<EventEntry>();
-            var result = new ScanResult { Time = now, Config = config };
+            var result = new ScanResult { Time = now, Config = config, IsQuick = quick, Sequence = ++sequence };
 
             // ---- this PC ----
             CheckRow antivirus = CheckAntivirus(config, now);
@@ -75,61 +165,6 @@ namespace SecHUD
                 detectionRow = new CheckRow("DETECTIONS", openItems.Count + " open" + (partial ? " | partial" : ""), true, false);
             }
 
-            // ---- the network ----
-            List<DeviceRecord> devices;
-            string gatewayMac, gatewayIp, dnsServers;
-            CheckRow lanRow = CheckLan(config, approve, events, now, out devices, out gatewayMac, out gatewayIp, out dnsServers);
-
-            string trustedGateway = state.GatewayMac;
-            bool gatewayChanged;
-            CheckRow gatewayRow = CheckGateway(gatewayMac, approve, events, now, state.GatewayChanged, ref trustedGateway, out gatewayChanged);
-
-            List<string> trustedDns = state.TrustedDns;
-            bool dnsChanged;
-            CheckRow dnsRow = CheckDns(dnsServers, approve, events, now, state.DnsChanged, trustedDns, out dnsChanged);
-
-            List<string> newAccessPoints;
-            CheckRow wifiRow = CheckWifi(config, approve, events, now, state, out newAccessPoints);
-
-            RouterSnapshot router;
-            CheckRow routerRow = CheckRouter(config, approve, events, now, state, gatewayIp, out router);
-
-            var hostRows = new List<CheckRow>();
-            foreach (WatchedHost host in config.WatchedHosts)
-            {
-                if (host == null || string.IsNullOrWhiteSpace(host.Host)) continue;
-                if (hostRows.Count >= MaxHostRows) break;
-                hostRows.Add(CheckHost(host, config, now));
-            }
-
-            // Approving accepts a changed Proxmox certificate: forget the old one so the next one is remembered.
-            string pinned = approve && state.ProxmoxCertChanged ? "" : state.ProxmoxThumbprint;
-            ProxmoxSnapshot proxmox;
-            try { proxmox = Proxmox.Fetch(config, pinned); }
-            catch { proxmox = new ProxmoxSnapshot { Configured = true, Error = "error" }; }
-            bool proxmoxCertChanged = false;
-            if (proxmox.Configured)
-            {
-                if (proxmox.CertChanged)
-                {
-                    proxmoxCertChanged = true;
-                    if (!state.ProxmoxCertChanged)
-                        AddEvent(events, now, "proxmox", "high", "Proxmox certificate changed (possible interception)", "T1557");
-                    hostRows.Add(new CheckRow("PROXMOX API", "CERT CHANGED", true, true));
-                }
-                else if (proxmox.Ok)
-                {
-                    if (pinned.Length == 0) pinned = proxmox.Thumbprint;
-                    int running = proxmox.Guests.Count(g => g.Running);
-                    hostRows.Add(new CheckRow("PROXMOX API", running + "/" + proxmox.Guests.Count + " running", false, true));
-                }
-                else
-                {
-                    hostRows.Add(new CheckRow("PROXMOX API", proxmox.Error.Length > 0 ? proxmox.Error : "DOWN", true, false));
-                }
-            }
-
-            // ---- events, only when something changed since the last pass ----
             if (state.DefenderOk && !antivirus.Ok) AddEvent(events, now, "antivirus", "high", "no antivirus is actively protecting this PC", "T1562.001");
             if (!state.DefenderOk && antivirus.Ok) AddEvent(events, now, "antivirus", "info", "antivirus protection is active again");
             if (state.FirewallOk && !firewall.Ok) AddEvent(events, now, "firewall", "high", "firewall profile disabled (" + firewall.Value + ")", "T1562.004");
@@ -138,29 +173,114 @@ namespace SecHUD
             bool loginsOver = logins.IsAlert;
             if (loginsOver && !state.LoginsOver) AddEvent(events, now, "logins", "high", logins.Value + " failed logins in 24h", "T1110");
 
-            List<int> newPorts = ports.Where(p => p.IsNew).Select(p => p.Port).ToList();
             foreach (PortInfo p in ports.Where(x => x.IsNew))
             {
                 if (!state.NewPorts.Contains(p.Port))
                     AddEvent(events, now, "new-port", "high", "new listening port " + p.Port + " (" + p.Process + ")");
             }
 
-            List<string> downNow = hostRows.Where(h => !h.Ok).Select(h => h.Label).ToList();
-            foreach (string name in downNow)
+            var pcRows = new List<CheckRow> { antivirus, firewall, logins, portRow, autorunRow, accountRow, detectionRow };
+
+            // ---- the network ----
+            List<CheckRow> netRows;
+            List<DeviceRecord> devices;
+            ProxmoxSnapshot proxmox;
+            RouterSnapshot router;
+            List<string> trustedDns = state.TrustedDns;
+            bool dnsChanged;
+
+            if (quick)
             {
-                if (!state.HostsDown.Contains(name)) AddEvent(events, now, "host", "high", name + " is DOWN");
+                // Reading the DNS setting costs nothing, so a hijack is caught live as well.
+                string dnsNow = null;
+                try
+                {
+                    LanInfo lan = config.ScanLan ? FindLan() : null;
+                    if (lan != null) dnsNow = lan.Dns;
+                }
+                catch { }
+                CheckRow dnsRow = CheckDns(dnsNow, false, events, now, state.DnsChanged, trustedDns, out dnsChanged);
+                if (string.IsNullOrEmpty(dnsNow))
+                {
+                    // Nothing could be read this instant: keep the row from the last full pass.
+                    dnsRow = lastFull.NetRows.FirstOrDefault(r => r.Label == dnsRow.Label) ?? dnsRow;
+                }
+                netRows = lastFull.NetRows.Select(r => r.Label == dnsRow.Label ? dnsRow : r).ToList();
+                devices = lastFull.Devices;
+                proxmox = lastFull.Proxmox;
+                router = lastFull.Router;
             }
-            foreach (string name in state.HostsDown)
+            else
             {
-                if (!downNow.Contains(name) && hostRows.Any(h => h.Label == name))
-                    AddEvent(events, now, "host", "info", name + " is back up");
+                string gatewayIp = facts.Lan != null && facts.Lan.Gateway != null ? facts.Lan.Gateway.ToString() : null;
+                string ownIp = facts.Lan != null ? facts.Lan.Ip.ToString() : null;
+                string dnsServers = facts.Lan != null ? facts.Lan.Dns : null;
+                string gatewayMac = null;
+                if (facts.Found != null && gatewayIp != null)
+                    gatewayMac = facts.Found.Where(p => p.Value == gatewayIp).Select(p => p.Key).FirstOrDefault();
+
+                CheckRow lanRow = EvaluateLan(config, facts.Found, ownIp, gatewayIp, approve, events, now, out devices);
+
+                string trustedGateway = state.GatewayMac;
+                bool gatewayChanged;
+                CheckRow gatewayRow = CheckGateway(gatewayMac, approve, events, now, state.GatewayChanged, ref trustedGateway, out gatewayChanged);
+                CheckRow dnsRow = CheckDns(dnsServers, approve, events, now, state.DnsChanged, trustedDns, out dnsChanged);
+
+                List<string> newAccessPoints;
+                CheckRow wifiRow = CheckWifi(config, facts, approve, events, now, state, out newAccessPoints);
+
+                router = facts.Router ?? new RouterSnapshot { Note = "turned off in settings" };
+                CheckRow routerRow = CheckRouter(config, router, approve, events, now, state);
+
+                List<CheckRow> hostRows = facts.HostRows.ToList();
+                string pinned = facts.Pinned ?? "";
+                proxmox = facts.Proxmox ?? new ProxmoxSnapshot();
+                bool proxmoxCertChanged = false;
+                if (proxmox.Configured)
+                {
+                    if (proxmox.CertChanged)
+                    {
+                        proxmoxCertChanged = true;
+                        if (!state.ProxmoxCertChanged)
+                            AddEvent(events, now, "proxmox", "high", "Proxmox certificate changed (possible interception)", "T1557");
+                        hostRows.Add(new CheckRow("PROXMOX API", "CERT CHANGED", true, true));
+                    }
+                    else if (proxmox.Ok)
+                    {
+                        if (pinned.Length == 0) pinned = proxmox.Thumbprint;
+                        int running = proxmox.Guests.Count(g => g.Running);
+                        hostRows.Add(new CheckRow("PROXMOX API", running + "/" + proxmox.Guests.Count + " running", false, true));
+                    }
+                    else
+                    {
+                        hostRows.Add(new CheckRow("PROXMOX API", proxmox.Error.Length > 0 ? proxmox.Error : "DOWN", true, false));
+                    }
+                }
+
+                List<string> downNow = hostRows.Where(h => !h.Ok).Select(h => h.Label).ToList();
+                foreach (string name in downNow)
+                {
+                    if (!state.HostsDown.Contains(name)) AddEvent(events, now, "host", "high", name + " is DOWN");
+                }
+                foreach (string name in state.HostsDown)
+                {
+                    if (!downNow.Contains(name) && hostRows.Any(h => h.Label == name))
+                        AddEvent(events, now, "host", "info", name + " is back up");
+                }
+
+                netRows = new List<CheckRow> { lanRow, gatewayRow, dnsRow, wifiRow, routerRow };
+                netRows.AddRange(hostRows);
+
+                state.HostsDown = downNow;
+                state.GatewayMac = trustedGateway ?? "";
+                state.GatewayChanged = gatewayChanged;
+                state.ProxmoxThumbprint = pinned ?? "";
+                state.ProxmoxCertChanged = proxmoxCertChanged;
+                state.NewForwards = router.Forwards.Where(f => f.IsNew).Select(f => f.Key).ToList();
+                state.NewAccessPoints = newAccessPoints;
             }
 
             // ---- overall level ----
-            var pcRows = new List<CheckRow> { antivirus, firewall, logins, portRow, autorunRow, accountRow, detectionRow };
-            var netRows = new List<CheckRow> { lanRow, gatewayRow, dnsRow, wifiRow, routerRow };
-            netRows.AddRange(hostRows);
-
             bool elevated = pcRows.Any(r => r.IsAlert) || netRows.Any(r => r.IsAlert);
             string level = elevated ? "ELEVATED" : "NOMINAL";
             if (level != state.Level) AddEvent(events, now, "level", "info", "status changed " + state.Level + " -> " + level);
@@ -174,41 +294,41 @@ namespace SecHUD
             else if (elevated) ticker = stamp + " see the flagged rows";
             else ticker = stamp + " scan complete, no changes";
 
-            Store.Save(Store.StatePath, new AppState
-            {
-                Level = level,
-                DefenderOk = antivirus.Ok,
-                FirewallOk = firewall.Ok,
-                LoginsOver = loginsOver,
-                HostsDown = downNow,
-                NewPorts = newPorts,
-                LastAlert = elevated ? lastAlert : "",
-                GatewayMac = trustedGateway ?? "",
-                GatewayChanged = gatewayChanged,
-                ProxmoxThumbprint = pinned ?? "",
-                ProxmoxCertChanged = proxmoxCertChanged,
-                EventsSinceUtc = eventsSince,
-                OpenDetections = openItems.Count,
-                OpenItems = openItems,
-                NewAutoruns = autoruns.Where(a => a.IsNew).Select(a => a.Key).ToList(),
-                TrustedDns = trustedDns,
-                DnsChanged = dnsChanged,
-                NewForwards = router.Forwards.Where(f => f.IsNew).Select(f => f.Key).ToList(),
-                NewAccessPoints = newAccessPoints,
-                LogMarkers = state.LogMarkers
-            });
+            state.Level = level;
+            state.DefenderOk = antivirus.Ok;
+            state.FirewallOk = firewall.Ok;
+            state.LoginsOver = loginsOver;
+            state.NewPorts = ports.Where(p => p.IsNew).Select(p => p.Port).ToList();
+            state.LastAlert = elevated ? lastAlert : "";
+            state.EventsSinceUtc = eventsSince;
+            state.OpenDetections = openItems.Count;
+            state.OpenItems = openItems;
+            state.NewAutoruns = autoruns.Where(a => a.IsNew).Select(a => a.Key).ToList();
+            state.TrustedDns = trustedDns;
+            state.DnsChanged = dnsChanged;
+            Store.Save(Store.StatePath, state);
             Store.AppendEvents(events);
 
-            var point = new HistoryPoint
+            int highNow = events.Count(e => e.Severity == "high");
+            if (quick)
             {
-                Time = now,
-                Online = devices.Count(d => d.Online),
-                Unknown = devices.Count(d => !d.Approved),
-                Elevated = elevated,
-                HighEvents = events.Count(e => e.Severity == "high")
-            };
-            foreach (CheckRow host in hostRows) point.Hosts[host.Label] = host.Ok;
-            History.Append(point);
+                // History has one line per full pass. Alerts raised in between are added to the next one.
+                pendingHighEvents += highNow;
+            }
+            else
+            {
+                var point = new HistoryPoint
+                {
+                    Time = now,
+                    Online = devices.Count(d => d.Online),
+                    Unknown = devices.Count(d => !d.Approved),
+                    Elevated = elevated,
+                    HighEvents = highNow + pendingHighEvents
+                };
+                pendingHighEvents = 0;
+                foreach (CheckRow host in netRows.Skip(5)) point.Hosts[host.Label] = host.Ok;
+                History.Append(point);
+            }
 
             result.Level = level;
             result.Elevated = elevated;
@@ -223,6 +343,7 @@ namespace SecHUD
             result.Router = router;
             result.CustomRuleCount = customRules;
             result.NewEvents = events;
+            if (!quick) lastFull = result;
             return result;
         }
 
@@ -644,15 +765,16 @@ namespace SecHUD
         }
 
         /// <summary>Flags an access point that starts broadcasting the home Wi-Fi name (an "evil twin").</summary>
-        private static CheckRow CheckWifi(AppConfig config, bool approve, List<EventEntry> events, DateTime now,
+        private static CheckRow CheckWifi(AppConfig config, NetFacts facts, bool approve, List<EventEntry> events, DateTime now,
             AppState state, out List<string> stillNew)
         {
             const string label = "WI-FI TWIN CHECK";
             stillNew = new List<string>();
             if (!config.WatchWifi) return new CheckRow(label, "off", false, true);
+            if (facts.WifiFailed || facts.Wifi == null) return new CheckRow(label, "n/a", false, true);
             try
             {
-                WifiScan scan = Wifi.Scan();
+                WifiScan scan = facts.Wifi;
                 if (!scan.Available) return new CheckRow(label, "no wi-fi", false, true);
                 if (scan.NeedsLocation) return new CheckRow(label, "needs location", false, true);
                 return EvaluateWifi(config.HomeWifiName, scan, approve, events, now, state.NewAccessPoints, out stillNew);
@@ -704,24 +826,11 @@ namespace SecHUD
             return new CheckRow(label, total + " known | " + fresh.Count + " new", fresh.Count > 0, fresh.Count == 0);
         }
 
-        private static CheckRow CheckRouter(AppConfig config, bool approve, List<EventEntry> events, DateTime now,
-            AppState state, string gatewayIp, out RouterSnapshot router)
+        private static CheckRow CheckRouter(AppConfig config, RouterSnapshot router, bool approve, List<EventEntry> events,
+            DateTime now, AppState state)
         {
             const string label = "ROUTER FORWARDS";
-            router = new RouterSnapshot();
-            if (!config.WatchRouter)
-            {
-                router.Note = "turned off in settings";
-                return new CheckRow(label, "off", false, true);
-            }
-            try
-            {
-                router = Upnp.Query(gatewayIp);
-            }
-            catch
-            {
-                router = new RouterSnapshot { Note = "could not query the router" };
-            }
+            if (!config.WatchRouter) return new CheckRow(label, "off", false, true);
             if (!router.Found) return new CheckRow(label, "no upnp", false, true);
             return EvaluateForwards(router, approve, events, now, state.NewForwards);
         }
@@ -821,33 +930,20 @@ namespace SecHUD
             public string Dns;
         }
 
-        private static CheckRow CheckLan(AppConfig config, bool approve, List<EventEntry> events,
-            DateTime now, out List<DeviceRecord> devices, out string gatewayMac, out string gatewayIp, out string dnsServers)
+        /// <summary>Replaceable so tests do not wait on real name lookups.</summary>
+        public static Func<string, string> NameResolver = ResolveName;
+
+        /// <summary>
+        /// Compares what a sweep found with the stored device list: new devices, approvals, and
+        /// watched devices that have stopped answering. "found" maps MAC to IP, or is null when
+        /// no sweep could be done (then nothing is marked offline).
+        /// </summary>
+        public static CheckRow EvaluateLan(AppConfig config, Dictionary<string, string> found, string ownIp, string gatewayIp,
+            bool approve, List<EventEntry> events, DateTime now, out List<DeviceRecord> devices)
         {
             const string label = "LAN DEVICES";
             devices = new List<DeviceRecord>();
-            gatewayMac = null;
-            gatewayIp = null;
-            dnsServers = null;
             string today = now.ToString("s");
-
-            LanInfo lan = null;
-            Dictionary<string, string> found = null;
-            if (config.ScanLan)
-            {
-                try { lan = FindLan(); } catch { lan = null; }
-                if (lan != null) found = Sweep(lan);
-                if (lan != null)
-                {
-                    dnsServers = lan.Dns;
-                    if (lan.Gateway != null) gatewayIp = lan.Gateway.ToString();
-                }
-                if (found != null && gatewayIp != null)
-                {
-                    string address = gatewayIp;
-                    gatewayMac = found.Where(p => p.Value == address).Select(p => p.Key).FirstOrDefault();
-                }
-            }
 
             lock (Store.DevicesLock)
             {
@@ -884,9 +980,9 @@ namespace SecHUD
                         }
 
                         string name;
-                        if (pair.Value == lan.Ip.ToString()) name = Environment.MachineName;
-                        else if (lan.Gateway != null && pair.Value == lan.Gateway.ToString()) name = "gateway";
-                        else name = ResolveName(pair.Value);
+                        if (pair.Value == ownIp) name = Environment.MachineName;
+                        else if (gatewayIp != null && pair.Value == gatewayIp) name = "gateway";
+                        else name = NameResolver(pair.Value) ?? "";
 
                         var device = new DeviceRecord
                         {
@@ -903,12 +999,32 @@ namespace SecHUD
                         if (!firstRun)
                         {
                             string who = name.Length > 0 ? pair.Value + " (" + name + ")" : pair.Value;
-                            AddEvent(events, now, "new-device", "high", "new device " + who + " " + pair.Key);
+                            AddEvent(events, now, "new-device", "high", "new device " + who + " " + pair.Key + MakerNote(pair.Key));
                         }
                     }
 
                     if (firstRun)
                         AddEvent(events, now, "baseline", "info", "device baseline created with " + devices.Count + " devices");
+
+                    // Watched devices: one missed sweep is normal (a busy device can skip a reply), so it
+                    // takes a few in a row before the alert, and it is raised once, not on every scan.
+                    foreach (DeviceRecord d in devices)
+                    {
+                        if (d.Online)
+                        {
+                            if (d.Down && d.Watched) AddEvent(events, now, "device-watch", "info", "watched device " + Describe(d) + " is back online");
+                            d.Down = false;
+                            d.Missed = 0;
+                            continue;
+                        }
+                        if (d.Missed < 1000) d.Missed++;
+                        if (!d.Watched) { d.Down = false; continue; }
+                        if (!d.Down && d.Missed >= config.WatchMisses)
+                        {
+                            d.Down = true;
+                            AddEvent(events, now, "device-watch", "high", "watched device " + Describe(d) + " went offline");
+                        }
+                    }
                 }
 
                 int approvedNow = 0;
@@ -926,15 +1042,31 @@ namespace SecHUD
             }
 
             int unknown = devices.Count(d => !d.Approved);
+            int down = devices.Count(d => d.Watched && d.Down);
+            string tail = down > 0 ? " | " + down + " down" : "";
+            bool alert = unknown > 0 || down > 0;
             if (found == null)
             {
                 string why = config.ScanLan ? "no lan" : "off";
                 if (unknown > 0) why += " | " + unknown + " unknown";
-                return new CheckRow(label, why, unknown > 0, unknown == 0);
+                return new CheckRow(label, why + tail, alert, !alert);
             }
 
             int online = devices.Count(d => d.Online);
-            return new CheckRow(label, online + " | " + unknown + " unknown", unknown > 0, unknown == 0);
+            return new CheckRow(label, online + " | " + unknown + " unknown" + tail, alert, !alert);
+        }
+
+        private static string Describe(DeviceRecord d)
+        {
+            return string.IsNullOrEmpty(d.Name) ? d.Ip + " " + d.Mac : d.Name + " (" + d.Ip + ")";
+        }
+
+        /// <summary>Who made the device, added to the alert so an unknown one is easier to place.</summary>
+        private static string MakerNote(string mac)
+        {
+            string maker = Vendors.Lookup(mac);
+            if (maker.Length == 0) return "";
+            return maker == Vendors.PrivateLabel ? ", private address (often a phone or tablet)" : ", made by " + maker;
         }
 
         /// <summary>The physical adapter that is actually on the home network (never a VPN or VM adapter).</summary>

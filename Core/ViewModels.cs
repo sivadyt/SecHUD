@@ -7,7 +7,9 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
 
@@ -67,20 +69,50 @@ namespace SecHUD
         private bool online;
         private string lastSeen;
         private string openPorts = "";
+        private bool watched;
+        private bool down;
 
         public DeviceViewModel(MainViewModel owner, DeviceRecord record)
         {
             this.owner = owner;
             Mac = record.Mac;
+            Maker = Vendors.Lookup(record.Mac).ToUpperInvariant();
             name = record.Name ?? "";
             ApproveCommand = new RelayCommand(o => owner.ApproveDevice(this));
             ScanPortsCommand = new RelayCommand(o => owner.ScanDevicePorts(this));
+            WatchCommand = new RelayCommand(o => owner.ToggleWatch(this));
             Update(record);
         }
 
         public string Mac { get; private set; }
+
+        /// <summary>Who made the device, worked out from its MAC address. Empty when the maker is not in the table.</summary>
+        public string Maker { get; private set; }
         public ICommand ApproveCommand { get; private set; }
         public ICommand ScanPortsCommand { get; private set; }
+        public ICommand WatchCommand { get; private set; }
+
+        /// <summary>A watched device raises an alert when it stops answering.</summary>
+        public bool Watched
+        {
+            get { return watched; }
+            set
+            {
+                if (Set(ref watched, value))
+                {
+                    Raise("WatchLabel");
+                    Raise("Status");
+                }
+            }
+        }
+
+        public bool Down
+        {
+            get { return down; }
+            set { if (Set(ref down, value)) Raise("Status"); }
+        }
+
+        public string WatchLabel { get { return watched ? "WATCHING" : "WATCH"; } }
 
         public string Ip { get { return ip; } private set { Set(ref ip, value); } }
         public string LastSeen { get { return lastSeen; } private set { Set(ref lastSeen, value); } }
@@ -104,6 +136,7 @@ namespace SecHUD
                 if (Set(ref approved, value))
                 {
                     Raise("IsUnknown");
+                    Raise("IsApproved");
                     Raise("Status");
                 }
             }
@@ -130,7 +163,17 @@ namespace SecHUD
 
         public bool HasOpenPorts { get { return openPorts.Length > 0; } }
         public bool IsUnknown { get { return !approved; } }
-        public string Status { get { return !approved ? "UNKNOWN" : (online ? "ONLINE" : "OFFLINE"); } }
+        public bool IsApproved { get { return approved; } }
+
+        public string Status
+        {
+            get
+            {
+                if (!approved) return "UNKNOWN";
+                if (online) return "ONLINE";
+                return watched && down ? "DOWN" : "OFFLINE";
+            }
+        }
 
         /// <summary>Sort key: unknown devices first, then by address.</summary>
         public long SortKey
@@ -152,6 +195,8 @@ namespace SecHUD
             Ip = record.Ip ?? "";
             Approved = record.Approved;
             Online = record.Online;
+            Watched = record.Watched;
+            Down = record.Down;
             LastSeen = MainViewModel.ShortTime(record.LastSeen);
             // The name is left alone once shown, so a scan never overwrites what is being typed.
         }
@@ -200,6 +245,27 @@ namespace SecHUD
         public string Kind { get; set; }
         public string Name { get; set; }
         public string Command { get; set; }
+    }
+
+    /// <summary>A startup item that was denied and can be put back.</summary>
+    public class RemovedViewModel
+    {
+        public RemovedViewModel(MainViewModel owner, RemovedRecord record)
+        {
+            Record = record;
+            Time = MainViewModel.ShortTime(record.Ts);
+            Kind = (record.Kind ?? "").ToUpperInvariant();
+            Name = record.Name ?? "";
+            Command = record.Command ?? "";
+            RestoreCommand = new RelayCommand(o => owner.RestoreAutorun(this));
+        }
+
+        public RemovedRecord Record { get; private set; }
+        public string Time { get; private set; }
+        public string Kind { get; private set; }
+        public string Name { get; private set; }
+        public string Command { get; private set; }
+        public ICommand RestoreCommand { get; private set; }
     }
 
     public class ForwardViewModel : FlaggedViewModel
@@ -276,6 +342,27 @@ namespace SecHUD
         private const double ChartHeight = 70;
 
         private readonly Scanner scanner = new Scanner();
+        private readonly LiveWatch live = new LiveWatch();
+        private readonly List<string> heldAlerts = new List<string>();
+        private readonly Queue<DateTime> quickTimes = new Queue<DateTime>();
+        private SynchronizationContext uiContext;
+        private long lastSequence;
+        private bool quickRunning;
+        private bool quickAgain;
+        private string quickReason = "";
+        private DateTime lastQuickStart = DateTime.MinValue;
+        private bool loopsStarted;
+        private bool showWelcome;
+        private string welcomeStatus = "";
+        private string liveStatus = "LIVE WATCH STARTS AFTER THE FIRST SCAN";
+        private bool showProxmoxTab;
+        private bool showRouterTab = true;
+        private bool showLogsTab;
+        private bool hasRemoved;
+        private bool setLiveWatch = true;
+        private bool setQuietHours;
+        private string setQuietStart = "23:00";
+        private string setQuietEnd = "07:00";
         private readonly SyslogServer syslog = new SyslogServer();
         private readonly SyslogAuthRule syslogRule = new SyslogAuthRule();
         private readonly ConcurrentQueue<SyslogMessage> pendingLogs = new ConcurrentQueue<SyslogMessage>();
@@ -351,6 +438,7 @@ namespace SecHUD
             AlertBars = new ObservableCollection<BarViewModel>();
             StatusBars = new ObservableCollection<BarViewModel>();
             UptimeRows = new ObservableCollection<RowViewModel>();
+            Removed = new ObservableCollection<RemovedViewModel>();
 
             ScanCommand = new RelayCommand(o => { var ignored = ScanAsync(false); });
             ApproveAllCommand = new RelayCommand(o => { var ignored = ScanAsync(true); });
@@ -362,8 +450,10 @@ namespace SecHUD
             OpenRulesCommand = new RelayCommand(o => OpenRules());
             OpenUpdateCommand = new RelayCommand(o => Launch(updateUrl, ""));
             CheckUpdatesCommand = new RelayCommand(o => { var ignored = CheckForUpdateAsync(true); });
+            FinishWelcomeCommand = new RelayCommand(o => FinishWelcome());
 
             syslog.Received += OnSyslogReceived;
+            live.Changed += OnLiveChanged;
         }
 
         public ObservableCollection<RowViewModel> PcRows { get; private set; }
@@ -379,7 +469,9 @@ namespace SecHUD
         public ObservableCollection<BarViewModel> AlertBars { get; private set; }
         public ObservableCollection<BarViewModel> StatusBars { get; private set; }
         public ObservableCollection<RowViewModel> UptimeRows { get; private set; }
+        public ObservableCollection<RemovedViewModel> Removed { get; private set; }
 
+        public ICommand FinishWelcomeCommand { get; private set; }
         public ICommand ScanCommand { get; private set; }
         public ICommand ApproveAllCommand { get; private set; }
         public ICommand OpenConfigCommand { get; private set; }
@@ -427,6 +519,21 @@ namespace SecHUD
         public string FooterNote { get { return footerNote; } private set { Set(ref footerNote, value); } }
         public string DataFolder { get { return Store.Dir.ToUpperInvariant(); } }
 
+        /// <summary>One line under the scan time saying what the live watch last did.</summary>
+        public string LiveStatus { get { return liveStatus; } private set { Set(ref liveStatus, value); } }
+
+        /// <summary>The first-run welcome is on screen and nothing has been scanned yet.</summary>
+        public bool ShowWelcome { get { return showWelcome; } private set { Set(ref showWelcome, value); } }
+        public string WelcomeStatus { get { return welcomeStatus; } private set { Set(ref welcomeStatus, value); } }
+
+        // Tabs for features that are not in use stay out of the way.
+        public bool ShowProxmoxTab { get { return showProxmoxTab; } private set { Set(ref showProxmoxTab, value); } }
+        public bool ShowRouterTab { get { return showRouterTab; } private set { Set(ref showRouterTab, value); } }
+        public bool ShowLogsTab { get { return showLogsTab; } private set { Set(ref showLogsTab, value); } }
+
+        /// <summary>True when at least one denied startup item can still be put back.</summary>
+        public bool HasRemoved { get { return hasRemoved; } private set { Set(ref hasRemoved, value); } }
+
         public string EventFilter
         {
             get { return eventFilter; }
@@ -457,6 +564,10 @@ namespace SecHUD
         public string SetHomeWifiName { get { return setHomeWifiName; } set { Set(ref setHomeWifiName, value); } }
         public bool SetWatchWifi { get { return setWatchWifi; } set { Set(ref setWatchWifi, value); } }
         public bool SetWatchRouter { get { return setWatchRouter; } set { Set(ref setWatchRouter, value); } }
+        public bool SetLiveWatch { get { return setLiveWatch; } set { Set(ref setLiveWatch, value); } }
+        public bool SetQuietHours { get { return setQuietHours; } set { Set(ref setQuietHours, value); } }
+        public string SetQuietStart { get { return setQuietStart; } set { Set(ref setQuietStart, value); } }
+        public string SetQuietEnd { get { return setQuietEnd; } set { Set(ref setQuietEnd, value); } }
         public string SettingsStatus { get { return settingsStatus; } private set { Set(ref settingsStatus, value); } }
         public string DiscordState { get { return discordState; } private set { Set(ref discordState, value); } }
         public string ProxmoxSecretState { get { return proxmoxSecretState; } private set { Set(ref proxmoxSecretState, value); } }
@@ -467,17 +578,66 @@ namespace SecHUD
             if (started) return;
             started = true;
 
+            uiContext = SynchronizationContext.Current;
+
+            // A brand new install has never been welcomed and has no device list yet. Everyone else skips it.
             config = Store.LoadConfig();
+            bool firstRun = NeedsWelcome(config, File.Exists(Store.DevicesPath));
             LoadSettingsForm();
-            ApplySyslogSetting();
+            ApplyTabs();
+            RefreshRemoved();
 
             foreach (EventEntry e in Store.ReadRecentEvents(MaxShown)) allEvents.Add(ToViewModel(e));
             RefreshEvents();
             RefreshHistory(DateTime.Now);
 
+            if (firstRun)
+            {
+                Level = "WELCOME";
+                Ticker = "ANSWER THE WELCOME SCREEN TO START";
+                ShowWelcome = true;
+                return; // nothing is scanned until the welcome is answered
+            }
+            StartLoops();
+        }
+
+        /// <summary>The welcome is for a first run only: never answered before, and no device list yet.</summary>
+        public static bool NeedsWelcome(AppConfig config, bool hasDeviceList)
+        {
+            return config != null && !config.Welcomed && !hasDeviceList;
+        }
+
+        private void StartLoops()
+        {
+            if (loopsStarted) return;
+            loopsStarted = true;
+            ApplySyslogSetting();
             var scans = RunLoopAsync();
             var pump = PumpLoopAsync();
             var updates = UpdateLoopAsync();
+        }
+
+        /// <summary>The Start watching button on the welcome screen: save what was typed, then begin.</summary>
+        private void FinishWelcome()
+        {
+            if (!ShowWelcome) return;
+            if (!SaveSettingsCore(true))
+            {
+                WelcomeStatus = SettingsStatus;
+                return;
+            }
+            WelcomeStatus = "";
+            Ticker = "FIRST SCAN IN PROGRESS";
+            Level = "STARTING";
+            ShowWelcome = false;
+            StartLoops();
+        }
+
+        private void ApplyTabs()
+        {
+            ShowProxmoxTab = (config.ProxmoxHost ?? "").Length > 0;
+            ShowRouterTab = config.WatchRouter;
+            ShowLogsTab = config.SyslogEnabled;
         }
 
         /// <summary>Looks for a newer release shortly after start, then once a day.</summary>
@@ -552,6 +712,86 @@ namespace SecHUD
             {
                 await Task.Delay(1500);
                 try { DrainPending(); } catch (Exception ex) { Store.LogError("pump", ex); }
+                try { FlushHeldAlerts(DateTime.Now); } catch (Exception ex) { Store.LogError("quiet hours", ex); }
+            }
+        }
+
+        // ---- live watch ----
+
+        /// <summary>Starts or stops the watchers to match the settings. Called once the first scan is in.</summary>
+        private void ApplyLiveSetting()
+        {
+            try
+            {
+                if (!config.LiveWatch)
+                {
+                    live.Stop();
+                    LiveStatus = "LIVE WATCH IS OFF. CHANGES ARE FOUND ON THE NEXT SCAN.";
+                    return;
+                }
+                if (live.IsRunning) return;
+                live.Start(config);
+                LiveStatus = "LIVE WATCH ON";
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("live watch", ex);
+                LiveStatus = "LIVE WATCH COULD NOT START. CHANGES ARE FOUND ON THE NEXT SCAN.";
+            }
+        }
+
+        /// <summary>Watcher thread: hand the signal to the UI thread.</summary>
+        private void OnLiveChanged(string reason)
+        {
+            SynchronizationContext context = uiContext;
+            if (context == null) { var ignored = QuickScanAsync(reason); }
+            else context.Post(o => { var ignored = QuickScanAsync(reason); }, null);
+        }
+
+        /// <summary>
+        /// Re-checks this PC right now. If a check is already running, one more follows it, so
+        /// a change that lands in the middle is never missed.
+        /// </summary>
+        public async Task QuickScanAsync(string reason)
+        {
+            quickReason = reason ?? "";
+            if (quickRunning)
+            {
+                quickAgain = true;
+                return;
+            }
+            quickRunning = true;
+            try
+            {
+                do
+                {
+                    quickAgain = false;
+
+                    // A setting that never stops changing must not turn into a scan every second.
+                    DateTime now = DateTime.Now;
+                    while (quickTimes.Count > 0 && (now - quickTimes.Peek()).TotalSeconds > 60) quickTimes.Dequeue();
+                    double gap = quickTimes.Count > 10 ? 15 : 1.5;
+                    double wait = gap - (now - lastQuickStart).TotalSeconds;
+                    if (wait > 0) await Task.Delay(TimeSpan.FromSeconds(wait));
+
+                    lastQuickStart = DateTime.Now;
+                    quickTimes.Enqueue(lastQuickStart);
+                    string why = quickReason;
+                    ScanResult result = await Task.Run(() => scanner.RunQuick());
+                    if (result == null) continue;
+                    Apply(result);
+                    if (live.IsRunning)
+                        LiveStatus = ("LIVE WATCH ON | CHECKED " + result.Time.ToString("HH:mm:ss") + " (" + why + ")").ToUpperInvariant();
+                }
+                while (quickAgain);
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("live scan", ex);
+            }
+            finally
+            {
+                quickRunning = false;
             }
         }
 
@@ -590,20 +830,35 @@ namespace SecHUD
             else { var ignored = ScanAsync(false); }
         }
 
+        /// <summary>
+        /// Refreshes the status after a change that only concerns this PC (a port, an autorun, a
+        /// detection). That takes about a second, where a full scan would sweep the whole network first.
+        /// </summary>
+        private void RequestPcRefresh(string why)
+        {
+            if (lastResult == null) RequestScan();
+            else { var ignored = QuickScanAsync(why); }
+        }
+
         private void Apply(ScanResult result)
         {
+            // A full scan and a live check can finish close together. The newer one always wins.
+            if (result.Sequence != 0 && result.Sequence < lastSequence) return;
+            lastSequence = result.Sequence;
+
             lastResult = result;
             config = result.Config;
             Level = result.Level;
             IsElevated = result.Elevated;
             Ticker = (result.Ticker ?? "").ToUpperInvariant();
-            LastScan = "LAST SCAN " + result.Time.ToString("HH:mm:ss");
+            if (!result.IsQuick) LastScan = "LAST SCAN " + result.Time.ToString("HH:mm:ss");
 
             SyncRows(PcRows, result.PcRows);
             SyncRows(NetRows, result.NetRows);
 
-            // Devices: update in place so a name being edited keeps its focus.
-            foreach (DeviceRecord record in result.Devices)
+            // Devices: update in place so a name being edited keeps its focus. A live check
+            // carries the device list over from the last full scan, so there is nothing new in it.
+            foreach (DeviceRecord record in result.IsQuick ? new List<DeviceRecord>() : result.Devices)
             {
                 DeviceViewModel existing;
                 if (deviceIndex.TryGetValue(record.Mac, out existing))
@@ -649,24 +904,29 @@ namespace SecHUD
             }
             AutorunSummary = "AUTORUNS (" + Autoruns.Count + ")" + (freshAutoruns > 0 ? " " + freshAutoruns + " NEW" : "");
 
-            ApplyProxmox(result.Proxmox);
-            ApplyRouter(result.Router);
+            if (!result.IsQuick)
+            {
+                ApplyProxmox(result.Proxmox);
+                ApplyRouter(result.Router);
+                ApplyTabs();
+                if (loopsStarted) ApplyLiveSetting();
+            }
             RulesInfo = Detector.Rules.Length + " BUILT-IN RULES + " + result.CustomRuleCount + " OF YOUR OWN";
 
-            string alert = null;
+            var alerts = new List<EventEntry>();
             foreach (EventEntry e in result.NewEvents)
             {
                 allEvents.Insert(0, ToViewModel(e));
-                if (e.Severity == "high") alert = Describe(e);
+                if (e.Severity == "high") alerts.Add(e);
             }
             TrimEvents();
 
             var open = new HashSet<string>(result.OpenDetections.Select(e => e.Ts + "|" + e.Msg));
             foreach (EventViewModel e in allEvents) e.IsOpen = open.Contains(e.Ts + "|" + e.RawMessage);
             RefreshEvents();
-            RefreshHistory(result.Time);
+            if (!result.IsQuick || alerts.Count > 0) RefreshHistory(result.Time);
 
-            if (alert != null) SendAlert(alert);
+            SendAlerts(alerts);
         }
 
         private void ApplyProxmox(ProxmoxSnapshot snapshot)
@@ -782,24 +1042,70 @@ namespace SecHUD
             return iso ?? "";
         }
 
-        private void SendAlert(string message)
+        /// <summary>
+        /// Tells the user about new high events: a Windows notification for the latest one, and
+        /// every one of them to Discord. During quiet hours the ordinary ones are held for a summary.
+        /// </summary>
+        private void SendAlerts(List<EventEntry> alerts)
         {
+            if (alerts == null || alerts.Count == 0) return;
+
             if (config.Notify)
             {
+                string shown = Describe(alerts[alerts.Count - 1]);
+                if (alerts.Count > 1) shown += " (+" + (alerts.Count - 1) + " more)";
                 Action<string> handler = AlertRaised;
-                if (handler != null) handler(message);
+                if (handler != null) handler(shown);
             }
 
             string webhook = Secrets.Unprotect(config.DiscordWebhookProtected);
-            if (webhook.Length > 0)
+            if (webhook.Length == 0) return;
+
+            bool quiet = Quiet.IsQuiet(config, DateTime.Now);
+            var sendNow = new List<string>();
+            foreach (EventEntry e in alerts)
             {
-                string text = "SecHUD alert on " + Environment.MachineName + ": " + message;
-                Task.Run(() =>
+                if (quiet && !Quiet.IsUrgent(e))
                 {
-                    string error;
-                    if (!Discord.Send(webhook, text, out error)) Store.LogError("discord", new Exception(error));
-                });
+                    if (heldAlerts.Count < 200) heldAlerts.Add(ShortTime(e.Ts) + " " + Describe(e));
+                }
+                else sendNow.Add(Describe(e));
             }
+            if (sendNow.Count == 0) return;
+
+            string text = "SecHUD alert on " + Environment.MachineName + ": "
+                + (sendNow.Count == 1 ? sendNow[0] : "\n- " + string.Join("\n- ", sendNow));
+            PostToDiscord(webhook, text);
+        }
+
+        /// <summary>Once quiet hours are over, everything that was held goes out as one message.</summary>
+        public void FlushHeldAlerts(DateTime now)
+        {
+            if (heldAlerts.Count == 0 || Quiet.IsQuiet(config, now)) return;
+            string webhook = Secrets.Unprotect(config.DiscordWebhookProtected);
+            string text = Quiet.Digest(heldAlerts, Environment.MachineName);
+            heldAlerts.Clear();
+            if (webhook.Length > 0) PostToDiscord(webhook, text);
+        }
+
+        /// <summary>How many alerts are waiting for quiet hours to end.</summary>
+        public int HeldAlertCount { get { return heldAlerts.Count; } }
+
+        /// <summary>Replaceable so tests can see what would be posted without sending anything.</summary>
+        public Action<string, string> DiscordPoster;
+
+        private void PostToDiscord(string webhook, string text)
+        {
+            if (DiscordPoster != null)
+            {
+                DiscordPoster(webhook, text);
+                return;
+            }
+            Task.Run(() =>
+            {
+                string error;
+                if (!Discord.Send(webhook, text, out error)) Store.LogError("discord", new Exception(error));
+            });
         }
 
         // ---- syslog ----
@@ -864,15 +1170,15 @@ namespace SecHUD
         private void AddEvents(List<EventEntry> entries)
         {
             Store.AppendEvents(entries);
-            string alert = null;
+            var alerts = new List<EventEntry>();
             foreach (EventEntry e in entries)
             {
                 allEvents.Insert(0, ToViewModel(e));
-                if (e.Severity == "high") alert = Describe(e);
+                if (e.Severity == "high") alerts.Add(e);
             }
             TrimEvents();
             RefreshEvents();
-            if (alert != null) SendAlert(alert);
+            SendAlerts(alerts);
         }
 
         private void RefreshLogs()
@@ -1010,11 +1316,51 @@ namespace SecHUD
             }
         }
 
+        /// <summary>Starts or stops watching one device. A watched device raises an alert when it goes offline.</summary>
+        public async void ToggleWatch(DeviceViewModel device)
+        {
+            if (device == null || device.IsUnknown) return;
+            bool watch = !device.Watched;
+            device.Watched = watch;
+            if (!watch) device.Down = false;
+            string mac = device.Mac;
+            string label = (device.Name.Length > 0 ? device.Name : device.Ip) + " " + mac;
+            try
+            {
+                await Task.Run(() =>
+                {
+                    lock (Store.DevicesLock)
+                    {
+                        List<DeviceRecord> devices = Store.Load<List<DeviceRecord>>(Store.DevicesPath);
+                        if (devices == null) return;
+                        foreach (DeviceRecord d in devices)
+                        {
+                            if (d == null || !string.Equals(Scanner.NormalizeMac(d.Mac), mac, StringComparison.OrdinalIgnoreCase)) continue;
+                            d.Watched = watch;
+                            d.Missed = 0;
+                            d.Down = false;
+                        }
+                        Store.Save(Store.DevicesPath, devices);
+                    }
+                });
+                AddEvents(new List<EventEntry>
+                {
+                    new EventEntry { Ts = DateTime.Now.ToString("s"), Type = "device-watch", Severity = "info",
+                        Msg = (watch ? "now watching device " : "stopped watching device ") + label }
+                });
+                if (!watch) RequestScan(); // clears a DOWN flag from the status
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("watch", ex);
+            }
+        }
+
         public void ApprovePort(PortViewModel port)
         {
             if (port == null || !port.IsNew) return;
             port.IsNew = false;
-            RunApproval(() => scanner.ApprovePort(port.Port), "approved listening port " + port.Port);
+            RunApproval(() => scanner.ApprovePort(port.Port), "approved listening port " + port.Port, true);
         }
 
         public void ApproveAutorun(AutorunViewModel item)
@@ -1022,7 +1368,7 @@ namespace SecHUD
             if (item == null || !item.IsNew) return;
             item.IsNew = false;
             autorunSignature = ""; // make the next scan redraw the list
-            RunApproval(() => scanner.ApproveAutorun(item.Key), "approved autorun " + item.Name);
+            RunApproval(() => scanner.ApproveAutorun(item.Key), "approved autorun " + item.Name, true);
         }
 
         /// <summary>Deny: take the startup item out of Windows. Asks first, and keeps a copy.</summary>
@@ -1033,7 +1379,7 @@ namespace SecHUD
             string question = "Remove this startup item from Windows?\n\n"
                 + item.Kind + ":  " + item.Name + "\n"
                 + (string.IsNullOrEmpty(item.Command) ? "" : item.Command + "\n")
-                + "\nA record is kept in the data folder (removed-autoruns) so it can be put back.";
+                + "\nA record is kept, and the Restore button under the list puts it back.";
             if (Confirm == null || !Confirm(question)) return;
 
             var target = new AutorunItem { Kind = item.RawKind, Name = item.Name, Command = item.Command };
@@ -1050,6 +1396,7 @@ namespace SecHUD
 
                 item.IsNew = false;
                 autorunSignature = ""; // make the next scan redraw the list
+                RefreshRemoved();
                 FooterNote = ("DENIED: " + item.Name + " (" + message + ")").ToUpperInvariant();
                 AddEvents(new List<EventEntry>
                 {
@@ -1057,7 +1404,7 @@ namespace SecHUD
                         Msg = "denied " + target.Kind + " autorun " + target.Name + ": " + message
                               + (string.IsNullOrEmpty(target.Command) ? "" : " (was: " + target.Command + ")") }
                 });
-                RequestScan();
+                RequestPcRefresh("denied");
             }
             catch (Exception ex)
             {
@@ -1066,22 +1413,81 @@ namespace SecHUD
             }
         }
 
+        /// <summary>Restore: put a denied startup item back, and trust it so it is not flagged again.</summary>
+        public async void RestoreAutorun(RemovedViewModel item)
+        {
+            if (item == null) return;
+            string question = "Put this startup item back into Windows?\n\n" + item.Kind + ":  " + item.Name + "\n"
+                + (string.IsNullOrEmpty(item.Command) ? "" : item.Command + "\n");
+            if (Confirm == null || !Confirm(question)) return;
+
+            RemovedRecord record = item.Record;
+            try
+            {
+                string message = "";
+                bool restored = await Task.Run(() =>
+                {
+                    if (!SecHUD.Autoruns.Restore(record, out message)) return false;
+                    scanner.ApproveAutorun(SecHUD.Autoruns.KeyAfterRestore(record));
+                    return true;
+                });
+                if (!restored)
+                {
+                    FooterNote = "NOT RESTORED: " + item.Name.ToUpperInvariant();
+                    if (ShowMessage != null) ShowMessage("Could not put " + item.Name + " back.\n\n" + message);
+                    return;
+                }
+
+                autorunSignature = "";
+                RefreshRemoved();
+                FooterNote = ("RESTORED: " + item.Name + " (" + message + ")").ToUpperInvariant();
+                AddEvents(new List<EventEntry>
+                {
+                    new EventEntry { Ts = DateTime.Now.ToString("s"), Type = "restore", Severity = "info",
+                        Msg = "restored " + record.Kind + " autorun " + record.Name + ": " + message }
+                });
+                RequestPcRefresh("restored");
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("restore", ex);
+                if (ShowMessage != null) ShowMessage("Could not put " + item.Name + " back.\n\n" + ex.Message);
+            }
+        }
+
+        /// <summary>Rebuilds the list of denied items that can still be put back, newest first.</summary>
+        public void RefreshRemoved()
+        {
+            try
+            {
+                List<RemovedRecord> records = SecHUD.Autoruns.LoadRemoved();
+                Removed.Clear();
+                foreach (RemovedRecord record in records.Where(r => !r.Restored).Reverse().Take(50))
+                    Removed.Add(new RemovedViewModel(this, record));
+                HasRemoved = Removed.Count > 0;
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("removed list", ex);
+            }
+        }
+
         public void ApproveForward(ForwardViewModel forward)
         {
             if (forward == null || !forward.IsNew) return;
             forward.IsNew = false;
-            RunApproval(() => scanner.ApproveForward(forward.Key), "approved router forward " + forward.Port + " -> " + forward.Target);
+            RunApproval(() => scanner.ApproveForward(forward.Key), "approved router forward " + forward.Port + " -> " + forward.Target, false);
         }
 
         public void DismissDetection(EventViewModel item)
         {
             if (item == null || !item.IsOpen) return;
             item.IsOpen = false;
-            RunApproval(() => scanner.DismissDetection(item.Ts, item.RawMessage), "dismissed detection: " + item.RawMessage);
+            RunApproval(() => scanner.DismissDetection(item.Ts, item.RawMessage), "dismissed detection: " + item.RawMessage, true);
         }
 
         /// <summary>Writes the change off the UI thread, logs it, then rescans so the status reflects it.</summary>
-        private async void RunApproval(Action change, string logMessage)
+        private async void RunApproval(Action change, string logMessage, bool pcOnly)
         {
             try
             {
@@ -1090,7 +1496,7 @@ namespace SecHUD
                 {
                     new EventEntry { Ts = DateTime.Now.ToString("s"), Type = "approve", Severity = "info", Msg = logMessage }
                 });
-                RequestScan();
+                if (pcOnly) RequestPcRefresh("approved"); else RequestScan();
             }
             catch (Exception ex)
             {
@@ -1162,6 +1568,10 @@ namespace SecHUD
             SetWatchWifi = config.WatchWifi;
             SetWatchRouter = config.WatchRouter;
             SetCheckUpdates = config.CheckUpdates;
+            SetLiveWatch = config.LiveWatch;
+            SetQuietHours = config.QuietHours;
+            SetQuietStart = config.QuietStart;
+            SetQuietEnd = config.QuietEnd;
             DiscordState = config.DiscordWebhookProtected.Length > 0 ? "SAVED" : "NOT SET";
             ProxmoxSecretState = config.ProxmoxSecretProtected.Length > 0 ? "SAVED" : "NOT SET";
             try { SetStartWithWindows = StartupEntry.IsEnabled(); } catch { SetStartWithWindows = false; }
@@ -1201,6 +1611,12 @@ namespace SecHUD
 
         private void SaveSettings()
         {
+            SaveSettingsCore(false);
+        }
+
+        /// <summary>Returns false (with the reason in SettingsStatus) when something typed could not be accepted.</summary>
+        private bool SaveSettingsCore(bool fromWelcome)
+        {
             try
             {
                 AppConfig updated = Store.LoadConfig();
@@ -1221,6 +1637,18 @@ namespace SecHUD
                 updated.WatchWifi = SetWatchWifi;
                 updated.WatchRouter = SetWatchRouter;
                 updated.CheckUpdates = SetCheckUpdates;
+                updated.LiveWatch = SetLiveWatch;
+                updated.Welcomed = true;
+
+                int minutes;
+                if (!Quiet.TryParseTime(SetQuietStart, out minutes) || !Quiet.TryParseTime(SetQuietEnd, out minutes))
+                {
+                    SettingsStatus = "NOT SAVED: QUIET HOURS NEED TIMES LIKE 23:00 AND 07:00";
+                    return false;
+                }
+                updated.QuietHours = SetQuietHours;
+                updated.QuietStart = (SetQuietStart ?? "").Trim();
+                updated.QuietEnd = (SetQuietEnd ?? "").Trim();
 
                 // Secret boxes: blank keeps what is stored, NONE removes it, anything else replaces it.
                 string webhook = (SetDiscordWebhook ?? "").Trim();
@@ -1230,7 +1658,7 @@ namespace SecHUD
                     if (!Discord.IsValidWebhook(webhook))
                     {
                         SettingsStatus = "NOT SAVED: THAT IS NOT A DISCORD WEBHOOK ADDRESS";
-                        return;
+                        return false;
                     }
                     updated.DiscordWebhookProtected = Secrets.Protect(webhook);
                 }
@@ -1250,15 +1678,23 @@ namespace SecHUD
                     if (wantStartup) TrustOwnStartupEntry();
                 }
 
-                ApplySyslogSetting();
                 LoadSettingsForm();
+                ApplyTabs();
                 SettingsStatus = "SAVED " + DateTime.Now.ToString("HH:mm:ss");
+                if (fromWelcome) return true; // the first scan starts right after this
+
+                ApplySyslogSetting();
+                // The watchers are rebuilt so a changed setting (which logs, which ports) takes effect.
+                live.Stop();
+                if (loopsStarted && lastResult != null) ApplyLiveSetting();
                 RequestScan();
+                return true;
             }
             catch (Exception ex)
             {
                 Store.LogError("settings", ex);
                 SettingsStatus = ("NOT SAVED: " + ex.Message).ToUpperInvariant();
+                return false;
             }
         }
 
@@ -1327,6 +1763,7 @@ namespace SecHUD
 
         public void Shutdown()
         {
+            live.Stop();
             syslog.Stop();
         }
     }

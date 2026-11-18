@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="..\Core\**\*.cs" Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\Data\oui.gz" LogicalName="SecHUD.oui.gz" Link="Data\oui.gz" />
   </ItemGroup>
 
   <ItemGroup>

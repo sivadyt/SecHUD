@@ -22,6 +22,8 @@ namespace SecHUD
             viewModel.UpdateFound += OnUpdateFound;
             viewModel.Confirm = AskYesNo;
             viewModel.ShowMessage = ShowInfo;
+            viewModel.PropertyChanged += OnViewModelChanged;
+            RestorePlacement();
             SetupTray();
 
             // Started here, not on Loaded, so monitoring also runs when the app starts hidden in the tray.
@@ -32,7 +34,84 @@ namespace SecHUD
 
         private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            if (e.ButtonState == MouseButtonState.Pressed) DragMove();
+            if (e.ClickCount == 2)
+            {
+                ToggleMaximize();
+                return;
+            }
+            if (e.ButtonState == MouseButtonState.Pressed && WindowState == WindowState.Normal) DragMove();
+        }
+
+        private void Maximize_Click(object sender, RoutedEventArgs e)
+        {
+            ToggleMaximize();
+        }
+
+        private void ToggleMaximize()
+        {
+            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+        }
+
+        /// <summary>A maximized window hangs a few pixels past each screen edge. This pulls the frame back in.</summary>
+        protected override void OnStateChanged(EventArgs e)
+        {
+            base.OnStateChanged(e);
+            RootBorder.Margin = WindowState == WindowState.Maximized ? new Thickness(7) : new Thickness(0);
+        }
+
+        // ---- window size, remembered between runs ----
+
+        private void RestorePlacement()
+        {
+            try
+            {
+                Rect work = SystemParameters.WorkArea;
+                WindowPlacement saved = Store.Load<WindowPlacement>(Store.WindowPath);
+                if (saved != null && saved.Width >= MinWidth && saved.Height >= MinHeight)
+                {
+                    Width = saved.Width;
+                    Height = saved.Height;
+                }
+                // Never start larger than the screen it opens on.
+                if (Width > work.Width) Width = Math.Max(MinWidth, work.Width);
+                if (Height > work.Height) Height = Math.Max(MinHeight, work.Height);
+                if (saved != null && saved.Maximized)
+                {
+                    WindowState = WindowState.Maximized;
+                    RootBorder.Margin = new Thickness(7);
+                }
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("window size", ex);
+            }
+        }
+
+        private void SavePlacement()
+        {
+            try
+            {
+                Rect bounds = RestoreBounds; // the size it has when not maximized
+                bool usable = !bounds.IsEmpty && bounds.Width >= MinWidth && bounds.Height >= MinHeight;
+                Store.Save(Store.WindowPath, new WindowPlacement
+                {
+                    Width = usable ? bounds.Width : Width,
+                    Height = usable ? bounds.Height : Height,
+                    Maximized = WindowState == WindowState.Maximized
+                });
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("window size", ex);
+            }
+        }
+
+        /// <summary>When a tab is hidden while it is the one on screen, fall back to the device list.</summary>
+        private void OnViewModelChanged(object sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == "ShowProxmoxTab" && !viewModel.ShowProxmoxTab && TabProxmox.IsChecked == true) TabDevices.IsChecked = true;
+            if (e.PropertyName == "ShowRouterTab" && !viewModel.ShowRouterTab && TabRouter.IsChecked == true) TabDevices.IsChecked = true;
+            if (e.PropertyName == "ShowLogsTab" && !viewModel.ShowLogsTab && TabLogs.IsChecked == true) TabDevices.IsChecked = true;
         }
 
         private void Minimize_Click(object sender, RoutedEventArgs e)
@@ -48,6 +127,7 @@ namespace SecHUD
         /// <summary>Closing the window keeps the monitor running in the tray. Exit is in the tray menu.</summary>
         protected override void OnClosing(CancelEventArgs e)
         {
+            SavePlacement();
             if (!exiting)
             {
                 e.Cancel = true;
@@ -139,6 +219,7 @@ namespace SecHUD
         private void OnTrayExit(object sender, EventArgs e)
         {
             exiting = true;
+            SavePlacement();
             viewModel.Shutdown();
             if (tray != null)
             {

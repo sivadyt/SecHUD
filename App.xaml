@@ -95,6 +95,9 @@
                 <DataTrigger Binding="{Binding Status}" Value="UNKNOWN">
                     <Setter Property="Foreground" Value="{StaticResource HazardBrush}"/>
                 </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="DOWN">
+                    <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+                </DataTrigger>
             </Style.Triggers>
         </Style>
 
@@ -317,6 +320,18 @@
         <Style x:Key="SmallButton" TargetType="Button" BasedOn="{StaticResource HudButton}">
             <Setter Property="FontSize" Value="11"/>
             <Setter Property="Padding" Value="10,3"/>
+        </Style>
+
+        <!-- The Watch toggle on a device: muted when off, cyan while the device is being watched -->
+        <Style x:Key="WatchButton" TargetType="Button" BasedOn="{StaticResource SmallButton}">
+            <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource MutedBrush}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Watched}" Value="True">
+                    <Setter Property="Foreground" Value="{StaticResource CyanBrush}"/>
+                    <Setter Property="BorderBrush" Value="{StaticResource CyanBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
         </Style>
 
         <Style x:Key="HintText" TargetType="TextBlock">

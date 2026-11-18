@@ -5,6 +5,20 @@ No third-party libraries and no NuGet packages.
 
 Use it only on a network you own or have permission to monitor.
 
+## How it works, in one example
+
+1. Something adds itself to the Windows startup list. That is one of the most common ways
+   malware makes sure it comes back after a reboot (MITRE ATT&CK T1547.001).
+2. Windows tells SecHUD the Run key changed. SecHUD re-checks this PC, compares the startup list
+   with the baseline it took on day one, and finds one entry it has never seen.
+3. A second or two later the status reads ELEVATED, the entry is at the top of the Autoruns tab
+   marked NEW, the event is logged with its ATT&CK technique, and your phone buzzes with the
+   Discord alert.
+4. You decide. Approve if it is something you installed. Deny removes it from Windows and
+   keeps a record, so Restore can put it back if you change your mind.
+
+`tests\live-test.cmd` runs exactly this, plus a new user account, so you can watch it happen.
+
 ## Install
 
 1. Download the newest `SecHUD-v*.zip` from the [Releases page](https://github.com/sivadyt/SecHUD/releases/latest).
@@ -50,6 +64,36 @@ be switched off in Settings.
 The first scan becomes the baseline. After that, anything new flips the status to ELEVATED until
 you approve it. Every change is appended to `events.log`.
 
+## Live watch
+
+A full scan runs every two minutes (you can change that). Between scans the live watch lets
+Windows report changes on this PC as they happen, and SecHUD re-checks the PC straight away:
+
+| What | How it is noticed |
+|---|---|
+| Run keys, the service list, scheduled tasks | Windows registry change notifications |
+| Firewall profiles, Defender settings, DNS settings | Windows registry change notifications |
+| The two Startup folders | File change notifications |
+| Events the detection rules use | A subscription to those event logs |
+| Listening ports | Compared every two seconds |
+| Local accounts and administrators | Compared every two seconds |
+
+A burst of changes (an installer writing several keys) is handled as one check. If something
+keeps changing without pause, the checks slow down so SecHUD never becomes the busy program.
+New devices on the network are found by the ARP sweep, so those still appear on the next scan.
+Live watch can be switched off in Settings.
+
+## Devices
+
+The device list shows who made each device, worked out from the first half of its MAC address
+using the public IEEE registry (packed into the exe, nothing is looked up online). Phones,
+tablets and laptops often invent an address for each network to make tracking harder. Those
+read PRIVATE ADDRESS, because no maker owns them.
+
+Press Watch on a device you care about, such as a camera, doorbell or NAS. If it misses two
+sweeps in a row you get an alert, and another line when it is back. Phones go quiet whenever
+they sleep, so watching one mostly tells you when its screen is off.
+
 ## Detection rules
 
 | Event | Meaning | ATT&CK | Level |
@@ -74,9 +118,10 @@ High detections stay open, and keep the status ELEVATED, until you dismiss them.
 row has its own Approve or Dismiss button. Approve all accepts everything at once.
 
 Flagged autoruns also have a Deny button, which removes the item from Windows after asking you
-to confirm. Nothing is thrown away: a Run entry is logged with its command, a startup file is
+to confirm. Nothing is thrown away: a Run entry is recorded with its command, a startup file is
 moved, and a scheduled task is exported as XML, all under `removed-autoruns` in the data folder.
-Items under HKLM need SecHUD started as administrator, and services are left to you.
+Denied items are listed under the Autoruns tab with a Restore button that puts them back exactly
+as they were. Items under HKLM need SecHUD started as administrator, and services are left to you.
 
 ### Your own rules
 
@@ -105,8 +150,8 @@ Closing the window hides it to the system tray so it keeps watching. Exit is in 
 ## Prove it works
 
 `tests\live-test.cmd` does two harmless things an attacker would do, waits while you watch SecHUD
-catch them, then undoes both: a new startup entry (T1547.001) and, when run as administrator, a
-new disabled local account (T1136.001).
+catch them within seconds, then undoes both: a new startup entry (T1547.001) and, when run as
+administrator, a new disabled local account (T1136.001).
 
 `run-tests.cmd` builds and runs the automated tests. They cover the detection rules, baselines,
 parsers and the window's logic using fake inputs and a temporary folder, so they never touch
@@ -114,27 +159,35 @@ your real data or send anything.
 
 ## Publishing a release (for the maintainer)
 
-1. Raise `<Version>` in `SecHUD.csproj`.
-2. Run `release.cmd`. It builds, runs the tests, and writes `release\SecHUD-v<version>.zip` with its SHA-256.
-3. On GitHub, draft a new release with the tag `v<version>`, describe what changed, attach the zip and publish.
+Every push to GitHub is built and tested there on a clean Windows machine (the Actions tab shows
+the result). Publishing is a separate step, so nothing reaches other people by accident:
 
-The tag is what installed copies compare with their own version, so it has to match.
+1. Raise `<Version>` in `SecHUD.csproj` and add a section for it at the top of `CHANGELOG.md`.
+   That section becomes the release text people see in the app.
+2. On GitHub open Actions, pick "Build and release", and press Run workflow.
+
+GitHub builds the exe, runs the tests, zips it, and publishes the release with the tag
+`v<version>`. Installed copies compare that tag with their own version, so everyone on an older
+one sees UPDATE AVAILABLE within a day. Pushing a tag such as `v0.8.0` does the same thing.
+
+`release.cmd` still makes the same zip on your own PC, for trying a build before publishing it.
 
 ## Tabs
 
 | Tab | What it shows |
 |---|---|
-| Devices | Every device seen. Click a name to rename it. Ports checks which common services a device offers. |
+| Devices | Every device seen, with its maker. Click a name to rename it. Watch alerts you when it goes offline. Ports checks which common services it offers. |
 | Ports | Listening ports on this PC and their processes |
-| Autoruns | Everything that starts by itself, new items first |
-| Router | Your public address and every port the router forwards inward |
-| Proxmox | Node load and the state of each VM and container |
+| Autoruns | Everything that starts by itself, new items first, and what you denied with a Restore button |
+| Router | Your public address and every port the router forwards inward (shown when the router check is on) |
+| Proxmox | Node load and the state of each VM and container (shown once a Proxmox host is set) |
 | Events | The event log with ATT&CK tags, searchable |
-| Logs | Syslog lines received from other devices, searchable |
+| Logs | Syslog lines received from other devices, searchable (shown when syslog intake is on) |
 | History | Devices online, alerts and status per hour for the last day, plus host uptime |
 | Settings | Everything configurable, including Discord alerts and Start with Windows |
 
-Export report (bottom right) saves an HTML report to `Documents\SecHUD Reports`.
+Export report (bottom right) saves an HTML report to `Documents\SecHUD Reports`. The window can
+be resized or maximized, and it opens at the size you left it.
 
 ## Optional setup
 
@@ -150,6 +203,12 @@ access the events missed in the meantime (up to two days) are still reported.
 
 **Discord alerts.** In Discord: channel settings, Integrations, Webhooks, New Webhook, Copy Webhook
 URL. Paste it in Settings and press Send test.
+
+**Quiet hours.** Switch them on in Settings and give a start and end time (24-hour clock, for
+example 23:00 until 07:00). Ordinary alerts, such as a new device or startup item, are held and
+sent as one summary when quiet hours end. Urgent ones still arrive straight away: protection
+switched off, a new account or administrator, cleared logs, malware, and tampering with the
+gateway, DNS or Wi-Fi. Quiet hours only affect Discord. The app itself always shows everything.
 
 **Proxmox.** In Proxmox: Datacenter, Permissions, API Tokens, Add. Give the token the PVEAuditor
 role (read-only). Enter the host, the token ID (for example `root@pam!sechud`) and the secret in
@@ -174,7 +233,8 @@ Everything is plain JSON or text under `%LOCALAPPDATA%\SecHUD`:
 | `config.json` | Settings. Secrets inside are encrypted with Windows DPAPI for your account |
 | `devices.json` | Known devices, their names, approved or not |
 | `known-ports.json`, `known-autoruns.json`, `known-accounts.json`, `known-forwards.json`, `known-access-points.json` | Baselines |
-| `removed-autoruns\` | What Deny took out, kept so it can be put back |
+| `removed-autoruns\` | What Deny took out, kept so Restore can put it back |
+| `window.json` | The window size |
 | `rules.json` | Your own detection rules |
 | `events.log` | One JSON object per line |
 | `history.csv` | One line per scan |
@@ -188,6 +248,10 @@ Everything is plain JSON or text under `%LOCALAPPDATA%\SecHUD`:
 - The Ports check on a device tries about 30 common ports, not all 65535.
 - The router list needs UPnP switched on in the router. Many ship with it off, and the row then reads `NO UPNP`.
 - Switching a VPN on can change the DNS servers. Approve the new setting once and both are trusted.
+- The live watch covers this PC. A new device on the network is found by the next sweep, not instantly.
+- A firewall or antivirus change is noticed live through the registry. If a product keeps its
+  switch somewhere else, the change is found on the next scan.
+- The maker list is a snapshot of the IEEE registry, so a very new maker can show up blank.
 - SecHUD runs as a normal user and never asks for admin.
 
 ## What it sends
@@ -202,16 +266,20 @@ leaves your network. Exported reports leave out your public address.
 
 | Path | Contents |
 |---|---|
-| `Core/Scanner.cs` | Runs every check and detects changes |
+| `Core/Scanner.cs` | Runs every check and detects changes (full scans and live checks) |
+| `Core/LiveWatch.cs` | Asks Windows to report changes as they happen |
 | `Core/Detections.cs` | Windows event rules and ATT&CK mapping |
 | `Core/Autoruns.cs`, `Core/Accounts.cs`, `Core/Antivirus.cs` | Persistence, account and antivirus checks |
 | `Core/Syslog.cs`, `Core/Proxmox.cs`, `Core/Discord.cs`, `Core/PortScanner.cs` | Network integrations |
 | `Core/Wifi.cs`, `Core/Upnp.cs` | Wi-Fi access points and router port forwards |
+| `Core/Vendors.cs`, `Data/oui.gz` | Device makers by MAC address (the public IEEE registry) |
+| `Core/Quiet.cs` | Quiet hours for Discord |
 | `Core/Updater.cs` | The check for a newer release |
 | `Core/History.cs`, `Core/Report.cs` | History file, charts data and HTML export |
 | `Core/Store.cs`, `Core/Secrets.cs`, `Core/Models.cs` | Storage, DPAPI secrets, data types |
-| `Core/Native.cs` | The two Windows API calls (SendARP, GetExtendedTcpTable) |
+| `Core/Native.cs` | The few Windows API calls .NET has no wrapper for |
 | `Core/ViewModels.cs` | What the window binds to, and the scan loop |
 | `MainWindow.xaml`, `App.xaml` | The window and its theme |
 | `tests/` | Automated tests and the live test script |
-| `release.cmd`, `tools/` | Builds the zip for a GitHub release |
+| `release.cmd`, `tools/` | Builds the zip on your own PC |
+| `.github/workflows/release.yml`, `CHANGELOG.md` | Builds, tests and publishes releases on GitHub |

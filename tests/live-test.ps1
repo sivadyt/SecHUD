@@ -35,11 +35,12 @@ try {
     New-ItemProperty -Path $runKey -Name $valueName -Value 'notepad.exe' -PropertyType String -Force | Out-Null
     Wait-ForYou @'
 A Run key entry named SecHUD-LiveTest was added.
-In SecHUD press SCAN NOW. You should see:
+Do not press anything. Within a few seconds the live watch should show:
   - AUTORUNS shows 1 NEW and the status goes to ELEVATED
   - the Autoruns tab lists HKCU\SecHUD-LiveTest at the top, flagged NEW
   - the Events tab has a line tagged T1547.001
   - a Discord message, if you set that up
+(If live watch is switched off in Settings, press SCAN NOW instead.)
 '@
 
     # ---- Test 2: account creation ----
@@ -57,7 +58,7 @@ In SecHUD press SCAN NOW. You should see:
         Disable-LocalUser -Name $userName
         Wait-ForYou @'
 A disabled local account named sechud-livetest was created (random password, cannot log in).
-In SecHUD press SCAN NOW. You should see:
+Do not press anything. Within a few seconds the live watch should show:
   - DETECTIONS shows 1 OPEN (it may also say PARTIAL, which is fine here)
   - the Events tab has a new-account line for SECHUD-LIVETEST tagged T1136.001, with a DISMISS button
   - a Discord message, if you set that up
@@ -80,6 +81,6 @@ finally {
 }
 
 Write-Host ''
-Write-Host 'Done. Press SCAN NOW once more: the autorun flag clears by itself.' -ForegroundColor Cyan
+Write-Host 'Done. The autorun flag clears by itself within a few seconds.' -ForegroundColor Cyan
 Write-Host 'Press DISMISS on the account detection in the Events tab to bring the status back to NOMINAL.' -ForegroundColor Cyan
 Read-Host 'Press Enter to close' | Out-Null

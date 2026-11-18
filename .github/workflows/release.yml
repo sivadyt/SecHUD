@@ -1,0 +1,106 @@
+# Builds SecHUD and runs its tests on every push, on a clean Windows machine.
+#
+# Publishing a release is a separate, deliberate step. Either:
+#   - open the Actions tab on GitHub, pick "Build and release", press Run workflow, or
+#   - push a tag named after the version, for example v0.8.0
+# The release is named after <Version> in SecHUD.csproj and its text comes from CHANGELOG.md.
+# Everyone running an older copy then sees UPDATE AVAILABLE within a day.
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish this version as a release
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content SecHUD.csproj
+          $version = $project.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ } | Select-Object -First 1
+          if (-not $version) { throw 'No <Version> found in SecHUD.csproj.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "SecHUD $version"
+
+      - name: Build the app
+        run: dotnet build SecHUD.csproj -c Release -nologo
+
+      - name: Build and run the tests
+        shell: pwsh
+        run: |
+          dotnet build tests\SecHUD.Tests.csproj -c Release -nologo
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & tests\bin\Release\SecHUD.Tests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'A test failed.' }
+
+      - name: Pack the zip
+        id: pack
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $stage = "release\SecHUD-v$version"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item bin\Release\SecHUD.exe $stage
+          if (Test-Path bin\Release\SecHUD.exe.config) { Copy-Item bin\Release\SecHUD.exe.config $stage }
+          Copy-Item README.md, LICENSE $stage
+          $zip = "release\SecHUD-v$version.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          "$hash  SecHUD-v$version.zip" | Set-Content "release\SecHUD-v$version.sha256.txt"
+          Write-Host "SHA-256: $hash"
+
+          # The release text is this version's section of CHANGELOG.md.
+          $notes = New-Object System.Collections.Generic.List[string]
+          $inside = $false
+          foreach ($line in Get-Content CHANGELOG.md) {
+            if ($line -match '^##\s') {
+              if ($inside) { break }
+              $inside = $line -match ('^##\s+v?' + [regex]::Escape($version) + '(\s|$)')
+              continue
+            }
+            if ($inside) { $notes.Add($line) }
+          }
+          $text = ($notes -join "`n").Trim()
+          if (-not $text) { $text = "SecHUD $version" }
+          $text + "`n`nSHA-256 of the zip: ``$hash``" | Set-Content release\notes.md
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecHUD-v${{ steps.version.outputs.version }}
+          path: |
+            release/*.zip
+            release/*.sha256.txt
+          retention-days: 14
+
+      - name: Publish the release
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          if ('${{ github.ref_type }}' -eq 'tag' -and '${{ github.ref_name }}' -ne "v$version") {
+            throw "The tag ${{ github.ref_name }} does not match version $version in SecHUD.csproj."
+          }
+          gh release view "v$version" *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release v$version already exists. Raise <Version> in SecHUD.csproj first." }
+          gh release create "v$version" "release\SecHUD-v$version.zip" "release\SecHUD-v$version.sha256.txt" `
+            --title "SecHUD $version" --notes-file release\notes.md --target $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'The release could not be created.' }

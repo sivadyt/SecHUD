@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using Microsoft.Win32;
@@ -92,12 +93,15 @@ namespace SecHUD
                             message = "could not work out where this entry lives";
                             return false;
                         }
-                        LogRemoval(item, "registry value deleted");
-                        if (!DeleteRegistryValue(hive, view, path, valueName))
+                        string raw, valueKind;
+                        bool existed = ReadRegistryValue(hive, view, path, valueName, out raw, out valueKind);
+                        if (!existed || !DeleteRegistryValue(hive, view, path, valueName))
                         {
                             message = "it was already gone";
                             return true;
                         }
+                        Record(item, stamp, "", raw, valueKind);
+                        LogRemoval(item, "registry value deleted");
                         message = "removed the Run entry";
                         return true;
 
@@ -109,6 +113,7 @@ namespace SecHUD
                         }
                         string target = Path.Combine(Store.QuarantineDir, stamp + "-" + Path.GetFileName(item.Command));
                         File.Move(item.Command, target);
+                        Record(item, stamp, target, "", "");
                         LogRemoval(item, "file moved to " + target);
                         message = "moved the startup file out";
                         return true;
@@ -175,9 +180,236 @@ namespace SecHUD
             File.WriteAllText(backup, Convert.ToString(task.Xml) ?? "");
 
             folder.DeleteTask(taskName, 0);
+            Record(item, stamp, backup, "", "");
             LogRemoval(item, "task deleted, definition saved to " + backup);
             message = "deleted the scheduled task";
             return true;
+        }
+
+        /// <summary>The raw (unexpanded) text of a registry value and its kind. False when it does not exist.</summary>
+        public static bool ReadRegistryValue(RegistryHive hive, RegistryView view, string path, string valueName, out string raw, out string kind)
+        {
+            raw = "";
+            kind = "";
+            using (RegistryKey root = RegistryKey.OpenBaseKey(hive, view))
+            using (RegistryKey key = root.OpenSubKey(path))
+            {
+                if (key == null) return false;
+                object value = key.GetValue(valueName, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+                if (value == null) return false;
+                raw = Convert.ToString(value) ?? "";
+                kind = key.GetValueKind(valueName).ToString();
+                return true;
+            }
+        }
+
+        // ------------------------------------------------------------ restore ---
+
+        private static readonly object RemovedLock = new object();
+
+        /// <summary>Everything that has been denied, oldest first. Items denied by an older version are read from its log.</summary>
+        public static List<RemovedRecord> LoadRemoved()
+        {
+            lock (RemovedLock)
+            {
+                List<RemovedRecord> records = Store.Load<List<RemovedRecord>>(Store.RemovedPath);
+                if (records != null) return records.Where(r => r != null).ToList();
+
+                records = new List<RemovedRecord>();
+                try
+                {
+                    if (File.Exists(Store.RemovedLogPath))
+                    {
+                        foreach (string line in File.ReadAllLines(Store.RemovedLogPath))
+                        {
+                            RemovedRecord parsed = ParseLogLine(line);
+                            if (parsed != null) records.Add(parsed);
+                        }
+                    }
+                }
+                catch { }
+                return records;
+            }
+        }
+
+        /// <summary>One line of the older removed.log: time, kind, name, command, what was done.</summary>
+        public static RemovedRecord ParseLogLine(string line)
+        {
+            string[] parts = (line ?? "").Split('\t');
+            if (parts.Length < 5 || parts[1].Length == 0 || parts[2].Length == 0) return null;
+            if (parts[4] == "restored") return null;
+            string backup = "";
+            foreach (string marker in new[] { "file moved to ", "definition saved to " })
+            {
+                int at = parts[4].IndexOf(marker, StringComparison.Ordinal);
+                if (at >= 0) backup = parts[4].Substring(at + marker.Length).Trim();
+            }
+            return new RemovedRecord { Id = parts[0] + "|" + parts[1] + "|" + parts[2], Ts = parts[0], Kind = parts[1], Name = parts[2], Command = parts[3], Backup = backup, ValueKind = "" };
+        }
+
+        /// <summary>Saved before the log line is written, so the log import can never count the same item twice.</summary>
+        private static void Record(AutorunItem item, string stamp, string backup, string raw, string valueKind)
+        {
+            try
+            {
+                lock (RemovedLock)
+                {
+                    List<RemovedRecord> records = LoadRemoved();
+                    records.Add(new RemovedRecord
+                    {
+                        Id = stamp + "|" + item.Kind + "|" + item.Name,
+                        Ts = DateTime.Now.ToString("s"),
+                        Kind = item.Kind,
+                        Name = item.Name,
+                        // A Run entry is put back exactly as it was written, variables and all.
+                        Command = item.Kind == "run" && !string.IsNullOrEmpty(raw) ? raw : (item.Command ?? ""),
+                        Backup = backup ?? "",
+                        ValueKind = valueKind ?? ""
+                    });
+                    if (records.Count > 200) records.RemoveRange(0, records.Count - 200);
+                    Store.Save(Store.RemovedPath, records);
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Puts a denied startup item back where it was. Nothing existing is overwritten: if
+        /// something with the same name is already there, the restore is refused.
+        /// </summary>
+        public static bool Restore(RemovedRecord record, out string message)
+        {
+            message = "";
+            if (record == null) { message = "nothing selected"; return false; }
+            try
+            {
+                switch (record.Kind)
+                {
+                    case "run":
+                        RegistryHive hive; RegistryView view; string path, valueName;
+                        if (!ParseRunName(record.Name, out hive, out view, out path, out valueName))
+                        {
+                            message = "could not work out where this entry lived";
+                            return false;
+                        }
+                        using (RegistryKey root = RegistryKey.OpenBaseKey(hive, view))
+                        using (RegistryKey key = root.CreateSubKey(path))
+                        {
+                            if (key == null) { message = "could not open the Run key"; return false; }
+                            if (key.GetValue(valueName) != null) { message = "an entry with that name already exists"; return false; }
+                            bool expand = string.Equals(record.ValueKind, "ExpandString", StringComparison.OrdinalIgnoreCase);
+                            key.SetValue(valueName, record.Command ?? "", expand ? RegistryValueKind.ExpandString : RegistryValueKind.String);
+                        }
+                        message = "put the Run entry back";
+                        break;
+
+                    case "startup":
+                        if (string.IsNullOrEmpty(record.Backup) || !File.Exists(record.Backup))
+                        {
+                            message = "the saved copy is no longer in the removed-autoruns folder";
+                            return false;
+                        }
+                        if (File.Exists(record.Command)) { message = "a file with that name is already in the startup folder"; return false; }
+                        File.Move(record.Backup, record.Command);
+                        message = "moved the startup file back";
+                        break;
+
+                    case "task":
+                        if (!RestoreTask(record, out message)) return false;
+                        break;
+
+                    default:
+                        message = "this kind of item cannot be put back from here";
+                        return false;
+                }
+                MarkRestored(record);
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                message = "Windows refused: this one needs administrator rights. Close SecHUD from the tray, then start SecHUD.exe with Run as administrator and try again.";
+                return false;
+            }
+            catch (System.Security.SecurityException)
+            {
+                message = "Windows refused: this one needs administrator rights. Close SecHUD from the tray, then start SecHUD.exe with Run as administrator and try again.";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                message = ex.Message;
+                return false;
+            }
+        }
+
+        /// <summary>The baseline key the item will have once it is back, so it is not flagged as new again.</summary>
+        public static string KeyAfterRestore(RemovedRecord record)
+        {
+            if (record == null) return "";
+            if (record.Kind != "run") return record.Kind + "|" + record.Name;
+            string command = record.Command ?? "";
+            // The scanner reads Run values with their variables filled in, so the key has to match that.
+            if (string.Equals(record.ValueKind, "ExpandString", StringComparison.OrdinalIgnoreCase))
+                command = Environment.ExpandEnvironmentVariables(command);
+            return "run|" + record.Name + "|" + command;
+        }
+
+        private static bool RestoreTask(RemovedRecord record, out string message)
+        {
+            if (string.IsNullOrEmpty(record.Backup) || !File.Exists(record.Backup))
+            {
+                message = "the saved task definition is no longer in the removed-autoruns folder";
+                return false;
+            }
+            string name = record.Name ?? "";
+            if (name.Length == 0 || name.IndexOf('"') >= 0 || record.Backup.IndexOf('"') >= 0)
+            {
+                message = "the task name cannot be used safely";
+                return false;
+            }
+
+            // schtasks is part of Windows. Without /f it refuses to overwrite a task that already exists.
+            var start = new ProcessStartInfo("schtasks.exe", "/create /tn \"" + name + "\" /xml \"" + record.Backup + "\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true
+            };
+            using (Process process = Process.Start(start))
+            {
+                string error = process.StandardError.ReadToEnd();
+                process.StandardOutput.ReadToEnd();
+                if (!process.WaitForExit(20000))
+                {
+                    try { process.Kill(); } catch { }
+                    message = "the Task Scheduler did not answer";
+                    return false;
+                }
+                if (process.ExitCode != 0)
+                {
+                    message = error.Trim().Length > 0 ? error.Trim() : "the Task Scheduler refused (exit code " + process.ExitCode + ")";
+                    return false;
+                }
+            }
+            message = "created the scheduled task again";
+            return true;
+        }
+
+        private static void MarkRestored(RemovedRecord record)
+        {
+            lock (RemovedLock)
+            {
+                List<RemovedRecord> records = LoadRemoved();
+                RemovedRecord match = records.FirstOrDefault(r => r.Id == record.Id);
+                if (match == null) { record.Restored = true; records.Add(record); }
+                else match.Restored = true;
+                record.Restored = true;
+                Store.Save(Store.RemovedPath, records);
+            }
+            Store.AppendLine(Store.RemovedLogPath,
+                DateTime.Now.ToString("s") + "\t" + record.Kind + "\t" + record.Name + "\t" + record.Command + "\trestored",
+                5L * 1024 * 1024);
         }
 
         private static void LogRemoval(AutorunItem item, string action)

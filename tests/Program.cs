@@ -58,6 +58,12 @@ static partial class Tests
             ReportExport();
             UpdateCheck();
             ViewModel();
+            QuietHours();
+            DeviceMakers();
+            WatchedDevices();
+            RestoreDenied();
+            LiveWatchHelpers();
+            LiveAndQuietInTheWindow();
             PlatformTests();
         }
         catch (Exception ex)
@@ -536,7 +542,268 @@ static partial class Tests
     }
 }
 
+static partial class Tests
+{
+    static void QuietHours()
+    {
+        int minutes;
+        Check("times are read as 24-hour clock times", Quiet.TryParseTime("23:00", out minutes) && minutes == 1380 && Quiet.TryParseTime(" 7:30 ", out minutes) && minutes == 450 && Quiet.TryParseTime("7", out minutes) && minutes == 420);
+        Check("nonsense times are refused", !Quiet.TryParseTime("25:00", out minutes) && !Quiet.TryParseTime("7:99", out minutes) && !Quiet.TryParseTime("soon", out minutes) && !Quiet.TryParseTime("", out minutes) && !Quiet.TryParseTime(null, out minutes) && !Quiet.TryParseTime("-1:00", out minutes));
+        Check("a quiet window can run past midnight", Quiet.InWindow(1380, 420, 30) && Quiet.InWindow(1380, 420, 1400) && !Quiet.InWindow(1380, 420, 720) && !Quiet.InWindow(1380, 420, 420));
+        Check("a daytime window, and an empty one", Quiet.InWindow(540, 1020, 600) && !Quiet.InWindow(540, 1020, 1200) && !Quiet.InWindow(600, 600, 600));
+
+        var config = AppConfig.CreateDefault();
+        var night = new DateTime(2026, 11, 18, 2, 15, 0);
+        bool offByDefault = !Quiet.IsQuiet(config, night);
+        config.QuietHours = true;
+        Check("quiet hours are off until switched on, then follow the clock", offByDefault && Quiet.IsQuiet(config, night) && !Quiet.IsQuiet(config, night.AddHours(10)));
+        config.QuietStart = "banana"; config.Normalize();
+        Check("a hand-edited time that makes no sense goes back to the default", config.QuietStart == "23:00" && config.QuietEnd == "07:00");
+
+        Check("protection being switched off, new accounts and tampering are urgent",
+            Quiet.IsUrgent(new EventEntry { Type = "antivirus" }) && Quiet.IsUrgent(new EventEntry { Type = "firewall" }) && Quiet.IsUrgent(new EventEntry { Type = "gateway" })
+            && Quiet.IsUrgent(new EventEntry { Type = "dns" }) && Quiet.IsUrgent(new EventEntry { Type = "wifi" })
+            && Quiet.IsUrgent(new EventEntry { Type = "detection", Technique = "T1136.001" }) && Quiet.IsUrgent(new EventEntry { Type = "detection", Technique = "T1070.001" })
+            && Quiet.IsUrgent(new EventEntry { Type = "detection", Technique = "", Msg = "Defender detected malware: X" }));
+        Check("a new device, port or startup item can wait until morning",
+            !Quiet.IsUrgent(new EventEntry { Type = "new-device", Msg = "new device 192.168.1.9" }) && !Quiet.IsUrgent(new EventEntry { Type = "new-port" })
+            && !Quiet.IsUrgent(new EventEntry { Type = "new-autorun", Technique = "T1547.001" }) && !Quiet.IsUrgent(new EventEntry { Type = "host" }) && !Quiet.IsUrgent(null));
+
+        var held = Enumerable.Range(1, 15).Select(i => "alert " + i).ToList();
+        string digest = Quiet.Digest(held, "PC");
+        Check("the morning summary counts everything and lists the first dozen", digest.StartsWith("SecHUD on PC: 15 alerts were held") && digest.Contains("- alert 12") && !digest.Contains("- alert 13") && digest.Contains("and 3 more")
+            && Quiet.Digest(new List<string> { "one" }, "PC").Contains("1 alert was held"));
+    }
+
+    static void DeviceMakers()
+    {
+        Check("the maker table is packed into the program", Vendors.Count > 30000);
+        Check("well-known makers are recognised from the MAC address", Vendors.Lookup("B8-27-EB-12-34-56").StartsWith("Raspberry Pi") && Vendors.Lookup("00:0c:29:aa:bb:cc") == "VMware" && Vendors.Lookup("F0D2F1000001") == "Amazon");
+        Check("an address a phone made up for privacy is labelled, not guessed at", Vendors.IsRandomized("DA-A1-19-00-00-01") && Vendors.Lookup("DA-A1-19-00-00-01") == Vendors.PrivateLabel && Vendors.IsRandomized("02:00:00:00:00:01") && !Vendors.IsRandomized("B8-27-EB-12-34-56") && !Vendors.IsRandomized("00-0C-29-AA-BB-CC"));
+        Check("an unknown or broken address gives no maker", Vendors.Lookup("FC-FF-FD-00-00-01") == "" && Vendors.Lookup("junk") == "" && Vendors.Lookup(null) == "" && Vendors.Lookup("") == "");
+
+        var table = new Dictionary<int, string>();
+        Vendors.Parse(new StringReader("AABBCC\tAcme\nbad line\n112233\tAcme\nZZZZZZ\tNope\n445566\t\n"), table);
+        Check("the maker table skips lines it cannot read", table.Count == 2 && table[0xAABBCC] == "Acme" && ReferenceEquals(table[0xAABBCC], table[0x112233]));
+    }
+
+    static Dictionary<string, string> Seen(params string[] macThenIp)
+    {
+        var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i + 1 < macThenIp.Length; i += 2) found[macThenIp[i]] = macThenIp[i + 1];
+        return found;
+    }
+
+    static void WatchedDevices()
+    {
+        const string cam = "B8-27-EB-00-00-01", tv = "AA-BB-CC-00-00-02", pc = "AA-BB-CC-00-00-03";
+        Func<string, string> realResolver = Scanner.NameResolver;
+        Scanner.NameResolver = ip => "";
+        try
+        {
+            File.Delete(Store.DevicesPath);
+            var config = AppConfig.CreateDefault();
+            DateTime now = DateTime.Now;
+            var events = new List<EventEntry>();
+            List<DeviceRecord> devices;
+
+            CheckRow first = Scanner.EvaluateLan(config, Seen(cam, "192.168.1.30", tv, "192.168.1.20", pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("the first sweep becomes the device baseline", first.Value == "3 | 0 unknown" && !first.IsAlert && devices.All(d => d.Approved) && events.Count == 1 && events[0].Type == "baseline" && devices.First(d => d.Mac == pc).Name == Environment.MachineName);
+
+            // Watch the camera, the way the Watch button does.
+            devices.First(d => d.Mac == cam).Watched = true;
+            devices.First(d => d.Mac == cam).Name = "camera";
+            Store.Save(Store.DevicesPath, devices);
+
+            events.Clear();
+            CheckRow missedOnce = Scanner.EvaluateLan(config, Seen(tv, "192.168.1.20", pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("one missed sweep is not an alert", !missedOnce.IsAlert && missedOnce.Value == "2 | 0 unknown" && events.Count == 0 && devices.First(d => d.Mac == cam).Missed == 1);
+
+            CheckRow missedTwice = Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("a watched device missing twice in a row raises the alert", missedTwice.IsAlert && missedTwice.Value == "1 | 0 unknown | 1 down" && events.Count == 1 && events[0].Severity == "high" && events[0].Type == "device-watch" && events[0].Msg == "watched device camera (192.168.1.30) went offline");
+            Check("a device that is not watched can go offline quietly", !events.Any(e => e.Msg.Contains("192.168.1.20")) && devices.First(d => d.Mac == tv).Missed == 1 && !devices.First(d => d.Mac == tv).Down);
+
+            events.Clear();
+            CheckRow stillDown = Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("the offline alert is raised once, and the row stays flagged", stillDown.IsAlert && events.Count == 0);
+
+            CheckRow noSweep = Scanner.EvaluateLan(config, null, null, null, false, events, now, out devices);
+            Check("when this PC is off the network, nothing is counted as missed", noSweep.Value == "no lan | 1 down" && noSweep.IsAlert && devices.First(d => d.Mac == cam).Missed == 3 && events.Count == 0);
+
+            CheckRow back = Scanner.EvaluateLan(config, Seen(cam, "192.168.1.30", pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("when it answers again the row clears and it is logged quietly", !back.IsAlert && back.Value == "2 | 0 unknown" && events.Count == 1 && events[0].Severity == "info" && events[0].Msg == "watched device camera (192.168.1.30) is back online" && !devices.First(d => d.Mac == cam).Down);
+
+            events.Clear();
+            config.WatchMisses = 1;
+            Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2", "DA-A1-19-00-00-09", "192.168.1.77", "00-0C-29-00-00-09", "192.168.1.78"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("the number of misses allowed is a setting", events.Any(e => e.Type == "device-watch" && e.Severity == "high"));
+            Check("a new device alert says who made it", events.Any(e => e.Msg == "new device 192.168.1.78 00-0C-29-00-00-09, made by VMware") && events.Any(e => e.Msg == "new device 192.168.1.77 DA-A1-19-00-00-09, private address (often a phone or tablet)"));
+
+            var reloaded = Store.Load<List<DeviceRecord>>(Store.DevicesPath);
+            Check("watch flags are saved with the device list", reloaded.First(d => d.Mac == cam).Watched && reloaded.First(d => d.Mac == cam).Down && !reloaded.First(d => d.Mac == tv).Watched);
+            var older = Store.FromJson<List<DeviceRecord>>("[{\"mac\":\"AA-BB-CC-00-00-01\",\"ip\":\"192.168.1.20\",\"name\":\"tv\",\"approved\":true}]");
+            Check("a device list from an older version loads with nothing watched", older.Count == 1 && !older[0].Watched && older[0].Missed == 0 && !older[0].Down);
+        }
+        finally
+        {
+            Scanner.NameResolver = realResolver;
+        }
+    }
+
+    static void RestoreDenied()
+    {
+        if (Directory.Exists(Store.QuarantineDir)) Directory.Delete(Store.QuarantineDir, true);
+        Check("with nothing denied the list is empty", Autoruns.LoadRemoved().Count == 0);
+
+        string startupFile = Path.Combine(Store.Dir, "chat-helper.lnk");
+        File.WriteAllText(startupFile, "shortcut");
+        string message;
+        Autoruns.Remove(new AutorunItem { Kind = "startup", Name = "chat-helper.lnk", Command = startupFile }, out message);
+        List<RemovedRecord> removed = Autoruns.LoadRemoved();
+        Check("a denied item is recorded with where its copy was kept", removed.Count == 1 && removed[0].Kind == "startup" && removed[0].Command == startupFile && File.Exists(removed[0].Backup) && !removed[0].Restored);
+
+        File.WriteAllText(startupFile, "something else took its place");
+        bool refused = !Autoruns.Restore(removed[0], out message);
+        Check("restore never overwrites a file that is already there", refused && message.Contains("already") && File.ReadAllText(startupFile).StartsWith("something else") && File.Exists(removed[0].Backup));
+        File.Delete(startupFile);
+
+        bool restored = Autoruns.Restore(removed[0], out message);
+        Check("restore puts the startup file back where it was", restored && File.ReadAllText(startupFile) == "shortcut" && !File.Exists(removed[0].Backup) && message == "moved the startup file back");
+        Check("a restored item is marked and its baseline key is known", Autoruns.LoadRemoved()[0].Restored && Autoruns.KeyAfterRestore(removed[0]) == "startup|chat-helper.lnk");
+        Check("restoring twice fails cleanly", !Autoruns.Restore(removed[0], out message) && message.Contains("no longer"));
+        File.Delete(startupFile);
+
+        Check("a Run entry's key matches what the scanner will read back",
+            Autoruns.KeyAfterRestore(new RemovedRecord { Kind = "run", Name = "HKCU\\Chat", Command = "C:\\chat.exe --tray", ValueKind = "String" }) == "run|HKCU\\Chat|C:\\chat.exe --tray"
+            && Autoruns.KeyAfterRestore(new RemovedRecord { Kind = "task", Name = "\\Updater" }) == "task|\\Updater" && Autoruns.KeyAfterRestore(null) == "");
+        Check("services and unknown kinds cannot be restored from here", !Autoruns.Restore(new RemovedRecord { Kind = "service", Name = "X" }, out message) && !Autoruns.Restore(null, out message)
+            && !Autoruns.Restore(new RemovedRecord { Kind = "run", Name = "Nonsense", Command = "x" }, out message)
+            && !Autoruns.Restore(new RemovedRecord { Kind = "task", Name = "\\Bad\"Name", Backup = startupFile }, out message));
+
+        // Items denied by version 0.7 only exist as lines in removed.log.
+        RemovedRecord fromLog = Autoruns.ParseLogLine("2026-11-18T05:20:11\tstartup\tevil.lnk\tC:\\Users\\x\\Startup\\evil.lnk\tfile moved to C:\\data\\removed-autoruns\\20261118-052011-evil.lnk");
+        RemovedRecord runLine = Autoruns.ParseLogLine("2026-11-18T05:21:00\trun\tHKCU\\SecHUD-LiveTest\tnotepad.exe\tregistry value deleted");
+        Check("items denied by the previous version are read from its log", fromLog != null && fromLog.Kind == "startup" && fromLog.Backup.EndsWith("20261118-052011-evil.lnk") && runLine != null && runLine.Name == "HKCU\\SecHUD-LiveTest" && runLine.Command == "notepad.exe" && runLine.Backup == ""
+            && Autoruns.ParseLogLine("garbage") == null && Autoruns.ParseLogLine(null) == null && Autoruns.ParseLogLine("2026-11-18T05:21:00\trun\tHKCU\\X\tx\trestored") == null);
+
+        if (Path.DirectorySeparatorChar == '\\')
+        {
+            const string scratch = "Software\\SecHUD-Tests";
+            using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(scratch)) key.SetValue("Expanding", "%WINDIR%\\notepad.exe", Microsoft.Win32.RegistryValueKind.ExpandString);
+            string raw, kind;
+            bool read = Autoruns.ReadRegistryValue(Microsoft.Win32.RegistryHive.CurrentUser, Microsoft.Win32.RegistryView.Default, scratch, "Expanding", out raw, out kind);
+            bool missing = Autoruns.ReadRegistryValue(Microsoft.Win32.RegistryHive.CurrentUser, Microsoft.Win32.RegistryView.Default, scratch, "NotThere", out raw, out kind);
+            Autoruns.ReadRegistryValue(Microsoft.Win32.RegistryHive.CurrentUser, Microsoft.Win32.RegistryView.Default, scratch, "Expanding", out raw, out kind);
+            Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(scratch, false);
+            Check("a registry value is recorded exactly as written, variables included", read && !missing && raw == "%WINDIR%\\notepad.exe" && kind == "ExpandString");
+        }
+
+        var vm = new MainViewModel();
+        File.WriteAllText(startupFile, "shortcut");
+        Autoruns.Remove(new AutorunItem { Kind = "startup", Name = "chat-helper.lnk", Command = startupFile }, out message);
+        vm.RefreshRemoved();
+        bool listed = vm.HasRemoved && vm.Removed.Count == 1 && vm.Removed[0].Kind == "STARTUP" && vm.Removed[0].Name == "chat-helper.lnk";
+        vm.Confirm = question => false;
+        vm.RestoreAutorun(vm.Removed[0]);
+        Check("the window lists what can be put back, and does nothing unless you answer yes", listed && !File.Exists(startupFile) && vm.Removed.Count == 1);
+    }
+
+    static void LiveWatchHelpers()
+    {
+        Check("the port check ignores short-lived high ports and the order they arrive in",
+            LiveWatch.PortSignature(new[] { 445, 135, 50123, 445 }, 49151) == "135,445" && LiveWatch.PortSignature(new[] { 135, 445, 61000 }, 49151) == LiveWatch.PortSignature(new[] { 445, 135 }, 49151)
+            && LiveWatch.PortSignature(new[] { 135, 445, 4444 }, 49151) != LiveWatch.PortSignature(new[] { 135, 445 }, 49151) && LiveWatch.PortSignature(null, 49151) == "");
+        Check("the account check notices an added account whatever the order or case",
+            LiveWatch.Signature(new[] { "user|Ty", "admin|PC\\Ty" }) == LiveWatch.Signature(new[] { "admin|pc\\ty", "user|ty", "user|ty" })
+            && LiveWatch.Signature(new[] { "user|ty" }) != LiveWatch.Signature(new[] { "user|ty", "user|backdoor" }));
+        Check("the event log is asked for exactly the events the rules use", LiveWatch.BuildQuery(new[] { 4732, 4720, 1102 }) == "*[System[(EventID=1102 or EventID=4720 or EventID=4732)]]");
+
+        var watch = new LiveWatch();
+        bool offAtFirst = !watch.IsRunning && watch.Summary == "off";
+        watch.Stop(); // stopping something that never started is harmless
+        Check("the live watch is off until it is started", offAtFirst && !watch.IsRunning);
+    }
+
+    static void LiveAndQuietInTheWindow()
+    {
+        DateTime now = DateTime.Now;
+        var vm = new MainViewModel();
+        var apply = typeof(MainViewModel).GetMethod("Apply", BindingFlags.NonPublic | BindingFlags.Instance);
+        var posted = new List<string>();
+        vm.DiscordPoster = (hook, text) => posted.Add(text);
+        string tray = null; vm.AlertRaised += x => tray = x;
+
+        ScanResult full = SampleResult();
+        full.Sequence = 10;
+        full.Devices[0].Mac = "B8-27-EB-00-00-01"; full.Devices[0].Watched = true;
+        full.Devices[1].Watched = true; full.Devices[1].Down = true;
+        full.Config.DiscordWebhookProtected = Secrets.Protect("https://discord.com/api/webhooks/1/abc");
+        full.Config.QuietHours = true;
+        full.Config.QuietStart = Quiet.FormatTime(((now.Hour + 23) % 24) * 60);
+        full.Config.QuietEnd = Quiet.FormatTime(((now.Hour + 2) % 24) * 60);
+        full.NewEvents.Add(new EventEntry { Ts = now.ToString("s"), Type = "new-device", Severity = "high", Msg = "new device 192.168.1.47" });
+        apply.Invoke(vm, new object[] { full });
+
+        Check("the device list shows who made each device", vm.Devices.Count(d => d.Maker.StartsWith("RASPBERRY PI")) == 1 && vm.Devices.Count(d => d.Maker == "PRIVATE ADDRESS") == 2);
+        Check("a watched device reads WATCHING, and DOWN once it has gone", vm.Devices.First(d => d.Ip == "192.168.1.20").WatchLabel == "WATCHING" && vm.Devices.First(d => d.Ip == "192.168.1.3").Status == "DOWN" && vm.Devices.First(d => d.Ip == "192.168.1.47").WatchLabel == "WATCH");
+        Check("the Windows notification names the latest alert and counts the rest", tray != null && tray.Contains("new device 192.168.1.47") && tray.Contains("(+1 more)"));
+        Check("in quiet hours an urgent alert is sent and an ordinary one is held", posted.Count == 1 && posted[0].Contains("new local user account created: backdoor [T1136.001]") && !posted[0].Contains("new device") && vm.HeldAlertCount == 1);
+
+        vm.FlushHeldAlerts(now);
+        bool stillHeld = posted.Count == 1 && vm.HeldAlertCount == 1;
+        full.Config.QuietHours = false;
+        vm.FlushHeldAlerts(now);
+        Check("when quiet hours end the held alerts arrive as one summary", stillHeld && posted.Count == 2 && posted[1].Contains("1 alert was held during quiet hours") && posted[1].Contains("new device 192.168.1.47") && vm.HeldAlertCount == 0);
+
+        Check("tabs for features that are not in use are hidden", !vm.ShowProxmoxTab && !vm.ShowLogsTab && vm.ShowRouterTab);
+        ScanResult withProxmox = SampleResult();
+        withProxmox.Sequence = 11; withProxmox.NewEvents.Clear();
+        withProxmox.Config.ProxmoxHost = "192.168.1.5"; withProxmox.Config.SyslogEnabled = true; withProxmox.Config.WatchRouter = false;
+        withProxmox.Config.DiscordWebhookProtected = full.Config.DiscordWebhookProtected;
+        apply.Invoke(vm, new object[] { withProxmox });
+        Check("and they appear once the feature is set up", vm.ShowProxmoxTab && vm.ShowLogsTab && !vm.ShowRouterTab);
+
+        // A live check: this PC only. The device list and the scan time belong to the last full scan.
+        string scanTime = vm.LastScan;
+        int deviceCount = vm.Devices.Count;
+        var quick = new ScanResult { Time = now.AddSeconds(5), Config = withProxmox.Config, Level = "ELEVATED", Elevated = true, Ticker = "live", IsQuick = true, Sequence = 12 };
+        quick.PcRows.Add(new CheckRow("AUTORUNS", "212 | 1 new", true, false));
+        quick.NetRows.Add(new CheckRow("LAN DEVICES", "3 | 1 unknown", true, false));
+        quick.Autoruns.Add(new AutorunItem { Kind = "run", Name = "HKCU\\Evil", Command = "evil.exe", IsNew = true });
+        quick.NewEvents.Add(new EventEntry { Ts = now.ToString("s"), Type = "new-autorun", Severity = "high", Msg = "new run autorun: HKCU\\Evil", Technique = "T1547.001" });
+        tray = null;
+        apply.Invoke(vm, new object[] { quick });
+        Check("a live check updates this PC's rows and raises its alert straight away", vm.PcRows.Count == 1 && vm.PcRows[0].Value == "212 | 1 NEW" && vm.Autoruns.Count == 1 && tray != null && tray.Contains("[T1547.001]") && posted.Last().Contains("new run autorun: HKCU\\Evil"));
+        Check("a live check leaves the device list and the scan time alone", vm.Devices.Count == deviceCount && vm.LastScan == scanTime);
+
+        ScanResult late = SampleResult();
+        late.Sequence = 9; late.Level = "NOMINAL"; late.NewEvents.Clear();
+        apply.Invoke(vm, new object[] { late });
+        Check("a result that arrives late never overwrites a newer one", vm.Level == "ELEVATED" && vm.PcRows[0].Label == "AUTORUNS");
+
+        var config = AppConfig.CreateDefault();
+        bool brandNew = MainViewModel.NeedsWelcome(config, false);
+        bool upgraded = MainViewModel.NeedsWelcome(config, true);
+        config.Welcomed = true;
+        Check("the welcome is shown on a first run only, never to someone upgrading", brandNew && !upgraded && !MainViewModel.NeedsWelcome(config, false) && !MainViewModel.NeedsWelcome(null, false));
+        var saved = Store.FromJson<AppConfig>(Store.ToJson(AppConfig.CreateDefault()));
+        Check("the new settings start with sensible defaults", saved.LiveWatch && saved.WatchMisses == 2 && !saved.QuietHours && saved.QuietStart == "23:00" && !saved.Welcomed);
+
+        // First run: the welcome is shown and nothing is scanned until it is answered.
+        File.Delete(Store.DevicesPath);
+        File.Delete(Store.ConfigPath);
+        var fresh = new MainViewModel();
+        fresh.Start();
+        Check("on a first run nothing is scanned until the welcome is answered", fresh.ShowWelcome && !fresh.IsScanning && fresh.Level == "WELCOME" && fresh.PcRows.Count == 0);
+        fresh.SetDiscordWebhook = "https://example.com/not-discord";
+        fresh.FinishWelcomeCommand.Execute(null);
+        Check("a bad webhook on the welcome screen is explained, and it stays open", fresh.ShowWelcome && fresh.WelcomeStatus.Contains("NOT A DISCORD WEBHOOK") && !fresh.IsScanning);
+        fresh.Shutdown();
+    }
+}
+
 /// <summary>Stands in for the Windows event log.</summary>
+
 class FakeEvents : IEventSource
 {
     public List<RawEvent> Items = new List<RawEvent>();
