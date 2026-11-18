@@ -1,0 +1,407 @@
+using System;
+using System.Collections.Generic;
+using System.Runtime.Serialization;
+
+namespace SecHUD
+{
+    /// <summary>A host the app checks on every scan (reachability, and certificate expiry when Tls is on).</summary>
+    [DataContract]
+    public class WatchedHost
+    {
+        [DataMember(Name = "name", Order = 1)] public string Name { get; set; }
+        [DataMember(Name = "host", Order = 2)] public string Host { get; set; }
+        [DataMember(Name = "port", Order = 3)] public int Port { get; set; }
+        [DataMember(Name = "tls", Order = 4)] public bool Tls { get; set; }
+    }
+
+    /// <summary>User settings, stored as config.json in the data folder.</summary>
+    [DataContract]
+    public class AppConfig
+    {
+        [DataMember(Name = "scanSeconds", Order = 1)] public int ScanSeconds { get; set; }
+        [DataMember(Name = "scanLan", Order = 2)] public bool ScanLan { get; set; }
+        [DataMember(Name = "notify", Order = 3)] public bool Notify { get; set; }
+        [DataMember(Name = "failedLoginThreshold", Order = 4)] public int FailedLoginThreshold { get; set; }
+        [DataMember(Name = "signatureMaxAgeHours", Order = 5)] public int SignatureMaxAgeHours { get; set; }
+        [DataMember(Name = "certWarnDays", Order = 6)] public int CertWarnDays { get; set; }
+        [DataMember(Name = "ignorePortsAbove", Order = 7)] public int IgnorePortsAbove { get; set; }
+        [DataMember(Name = "watchedHosts", Order = 8)] public List<WatchedHost> WatchedHosts { get; set; }
+        [DataMember(Name = "watchEvents", Order = 9)] public bool WatchEvents { get; set; }
+        [DataMember(Name = "watchAutoruns", Order = 10)] public bool WatchAutoruns { get; set; }
+        [DataMember(Name = "syslogEnabled", Order = 11)] public bool SyslogEnabled { get; set; }
+        [DataMember(Name = "syslogPort", Order = 12)] public int SyslogPort { get; set; }
+        [DataMember(Name = "proxmoxHost", Order = 13)] public string ProxmoxHost { get; set; }
+        [DataMember(Name = "proxmoxPort", Order = 14)] public int ProxmoxPort { get; set; }
+        [DataMember(Name = "proxmoxTokenId", Order = 15)] public string ProxmoxTokenId { get; set; }
+        [DataMember(Name = "watchWifi", Order = 18)] public bool WatchWifi { get; set; }
+        [DataMember(Name = "homeWifiName", Order = 19)] public string HomeWifiName { get; set; }
+        [DataMember(Name = "watchRouter", Order = 20)] public bool WatchRouter { get; set; }
+        [DataMember(Name = "checkUpdates", Order = 21)] public bool CheckUpdates { get; set; }
+
+        // Secrets are never stored as plain text. These hold DPAPI-encrypted values that only
+        // this Windows account can decrypt (see Secrets.cs).
+        [DataMember(Name = "proxmoxSecretProtected", Order = 16)] public string ProxmoxSecretProtected { get; set; }
+        [DataMember(Name = "discordWebhookProtected", Order = 17)] public string DiscordWebhookProtected { get; set; }
+
+        public AppConfig()
+        {
+            SetDefaults();
+        }
+
+        // The JSON serializer skips constructors, so defaults are applied here before members are read.
+        [OnDeserializing]
+        private void OnDeserializing(StreamingContext context)
+        {
+            SetDefaults();
+        }
+
+        private void SetDefaults()
+        {
+            ScanSeconds = 120;
+            ScanLan = true;
+            Notify = true;
+            FailedLoginThreshold = 5;
+            SignatureMaxAgeHours = 72;
+            CertWarnDays = 14;
+            IgnorePortsAbove = 49151;
+            WatchedHosts = new List<WatchedHost>();
+            WatchEvents = true;
+            WatchAutoruns = true;
+            SyslogEnabled = false;
+            SyslogPort = 514;
+            ProxmoxHost = "";
+            ProxmoxPort = 8006;
+            ProxmoxTokenId = "";
+            ProxmoxSecretProtected = "";
+            DiscordWebhookProtected = "";
+            WatchWifi = true;
+            HomeWifiName = "";
+            WatchRouter = true;
+            CheckUpdates = true;
+        }
+
+        public static AppConfig CreateDefault()
+        {
+            var config = new AppConfig();
+            return config;
+        }
+
+        /// <summary>Keeps hand-edited values inside sane limits.</summary>
+        public void Normalize()
+        {
+            if (ScanSeconds < 30) ScanSeconds = 30;
+            if (ScanSeconds > 3600) ScanSeconds = 3600;
+            if (FailedLoginThreshold < 1) FailedLoginThreshold = 1;
+            if (SignatureMaxAgeHours < 1) SignatureMaxAgeHours = 72;
+            if (CertWarnDays < 0) CertWarnDays = 0;
+            if (IgnorePortsAbove < 1 || IgnorePortsAbove > 65535) IgnorePortsAbove = 49151;
+            if (WatchedHosts == null) WatchedHosts = new List<WatchedHost>();
+            if (SyslogPort < 1 || SyslogPort > 65535) SyslogPort = 514;
+            if (ProxmoxPort < 1 || ProxmoxPort > 65535) ProxmoxPort = 8006;
+            if (ProxmoxHost == null) ProxmoxHost = "";
+            if (ProxmoxTokenId == null) ProxmoxTokenId = "";
+            if (ProxmoxSecretProtected == null) ProxmoxSecretProtected = "";
+            if (DiscordWebhookProtected == null) DiscordWebhookProtected = "";
+            if (HomeWifiName == null) HomeWifiName = "";
+        }
+    }
+
+    /// <summary>One device seen on the LAN, keyed by MAC address. Stored in devices.json.</summary>
+    [DataContract]
+    public class DeviceRecord
+    {
+        [DataMember(Name = "mac", Order = 1)] public string Mac { get; set; }
+        [DataMember(Name = "ip", Order = 2)] public string Ip { get; set; }
+        [DataMember(Name = "name", Order = 3)] public string Name { get; set; }
+        [DataMember(Name = "approved", Order = 4)] public bool Approved { get; set; }
+        [DataMember(Name = "firstSeen", Order = 5)] public string FirstSeen { get; set; }
+        [DataMember(Name = "lastSeen", Order = 6)] public string LastSeen { get; set; }
+
+        /// <summary>True when the device answered during the latest scan. Not saved.</summary>
+        [IgnoreDataMember] public bool Online { get; set; }
+    }
+
+    /// <summary>One line of events.log.</summary>
+    [DataContract]
+    public class EventEntry
+    {
+        [DataMember(Name = "ts", Order = 1)] public string Ts { get; set; }
+        [DataMember(Name = "type", Order = 2)] public string Type { get; set; }
+        [DataMember(Name = "severity", Order = 3)] public string Severity { get; set; }
+        [DataMember(Name = "msg", Order = 4)] public string Msg { get; set; }
+
+        /// <summary>MITRE ATT&amp;CK technique id (for example T1136.001) when the event maps to one.</summary>
+        [DataMember(Name = "technique", Order = 5, EmitDefaultValue = false)] public string Technique { get; set; }
+    }
+
+    /// <summary>What the previous scan saw, so events are only logged when something changes.</summary>
+    [DataContract]
+    public class AppState
+    {
+        [DataMember(Name = "level", Order = 1)] public string Level { get; set; }
+        [DataMember(Name = "defenderOk", Order = 2)] public bool DefenderOk { get; set; }
+        [DataMember(Name = "firewallOk", Order = 3)] public bool FirewallOk { get; set; }
+        [DataMember(Name = "loginsOver", Order = 4)] public bool LoginsOver { get; set; }
+        [DataMember(Name = "hostsDown", Order = 5)] public List<string> HostsDown { get; set; }
+        [DataMember(Name = "newPorts", Order = 6)] public List<int> NewPorts { get; set; }
+        [DataMember(Name = "lastAlert", Order = 7)] public string LastAlert { get; set; }
+        [DataMember(Name = "gatewayMac", Order = 8)] public string GatewayMac { get; set; }
+        [DataMember(Name = "gatewayChanged", Order = 9)] public bool GatewayChanged { get; set; }
+        [DataMember(Name = "proxmoxThumbprint", Order = 10)] public string ProxmoxThumbprint { get; set; }
+        [DataMember(Name = "proxmoxCertChanged", Order = 11)] public bool ProxmoxCertChanged { get; set; }
+        [DataMember(Name = "eventsSinceUtc", Order = 12)] public string EventsSinceUtc { get; set; }
+        [DataMember(Name = "openDetections", Order = 13)] public int OpenDetections { get; set; }
+        [DataMember(Name = "newAutoruns", Order = 14)] public List<string> NewAutoruns { get; set; }
+
+        /// <summary>High detections nobody has dismissed yet. They keep the status elevated.</summary>
+        [DataMember(Name = "openItems", Order = 15)] public List<EventEntry> OpenItems { get; set; }
+        [DataMember(Name = "trustedDns", Order = 16)] public List<string> TrustedDns { get; set; }
+        [DataMember(Name = "dnsChanged", Order = 17)] public bool DnsChanged { get; set; }
+        [DataMember(Name = "newForwards", Order = 18)] public List<string> NewForwards { get; set; }
+        [DataMember(Name = "newAccessPoints", Order = 19)] public List<string> NewAccessPoints { get; set; }
+
+        /// <summary>How far each event log has been read. A log that could not be read keeps its place,
+        /// so nothing is skipped once access is granted.</summary>
+        [DataMember(Name = "logMarkers", Order = 20)] public List<LogMarker> LogMarkers { get; set; }
+
+        /// <summary>Fills in anything an older state file did not have.</summary>
+        public void Normalize()
+        {
+            if (Level == null) Level = "NOMINAL";
+            if (HostsDown == null) HostsDown = new List<string>();
+            if (NewPorts == null) NewPorts = new List<int>();
+            if (NewAutoruns == null) NewAutoruns = new List<string>();
+            if (LastAlert == null) LastAlert = "";
+            if (GatewayMac == null) GatewayMac = "";
+            if (ProxmoxThumbprint == null) ProxmoxThumbprint = "";
+            if (EventsSinceUtc == null) EventsSinceUtc = "";
+            if (OpenItems == null) OpenItems = new List<EventEntry>();
+            if (TrustedDns == null) TrustedDns = new List<string>();
+            if (NewForwards == null) NewForwards = new List<string>();
+            if (NewAccessPoints == null) NewAccessPoints = new List<string>();
+            if (LogMarkers == null) LogMarkers = new List<LogMarker>();
+        }
+
+        public static AppState CreateDefault()
+        {
+            return new AppState
+            {
+                Level = "NOMINAL",
+                DefenderOk = true,
+                FirewallOk = true,
+                LoginsOver = false,
+                HostsDown = new List<string>(),
+                NewPorts = new List<int>(),
+                LastAlert = "",
+                NewAutoruns = new List<string>(),
+                GatewayMac = "",
+                ProxmoxThumbprint = "",
+                EventsSinceUtc = "",
+                OpenItems = new List<EventEntry>(),
+                TrustedDns = new List<string>(),
+                NewForwards = new List<string>(),
+                NewAccessPoints = new List<string>(),
+                LogMarkers = new List<LogMarker>()
+            };
+        }
+    }
+
+    /// <summary>One label/value line on the overview.</summary>
+    public class CheckRow
+    {
+        public string Label { get; set; }
+        public string Value { get; set; }
+        public bool IsAlert { get; set; }
+        /// <summary>For checks with a simple healthy/unhealthy meaning (Defender on, firewall on, host up).</summary>
+        public bool Ok { get; set; }
+
+        public CheckRow(string label, string value, bool isAlert, bool ok)
+        {
+            Label = label;
+            Value = value;
+            IsAlert = isAlert;
+            Ok = ok;
+        }
+    }
+
+    public class PortInfo
+    {
+        public int Port { get; set; }
+        public string Process { get; set; }
+        public bool IsNew { get; set; }
+    }
+
+    /// <summary>Everything one scan produced. Handed from the scanner to the window.</summary>
+    public class ScanResult
+    {
+        public DateTime Time { get; set; }
+        public AppConfig Config { get; set; }
+        public string Level { get; set; }
+        public bool Elevated { get; set; }
+        public string Ticker { get; set; }
+        public List<CheckRow> PcRows { get; set; }
+        public List<CheckRow> NetRows { get; set; }
+        public List<DeviceRecord> Devices { get; set; }
+        public List<PortInfo> Ports { get; set; }
+        public List<EventEntry> NewEvents { get; set; }
+        public List<AutorunItem> Autoruns { get; set; }
+        public ProxmoxSnapshot Proxmox { get; set; }
+        public List<EventEntry> OpenDetections { get; set; }
+        public RouterSnapshot Router { get; set; }
+        public int CustomRuleCount { get; set; }
+
+        public ScanResult()
+        {
+            PcRows = new List<CheckRow>();
+            NetRows = new List<CheckRow>();
+            Devices = new List<DeviceRecord>();
+            Ports = new List<PortInfo>();
+            NewEvents = new List<EventEntry>();
+            Autoruns = new List<AutorunItem>();
+            OpenDetections = new List<EventEntry>();
+            Router = new RouterSnapshot();
+        }
+    }
+
+    /// <summary>One port the router forwards from the internet to a device inside (learned over UPnP).</summary>
+    public class ForwardInfo
+    {
+        public int ExternalPort { get; set; }
+        public string Protocol { get; set; }
+        public string InternalClient { get; set; }
+        public int InternalPort { get; set; }
+        public string Description { get; set; }
+        public bool IsNew { get; set; }
+
+        public string Key
+        {
+            get { return (Protocol ?? "") + "|" + ExternalPort + "|" + (InternalClient ?? "") + "|" + InternalPort; }
+        }
+
+        public string Summary
+        {
+            get
+            {
+                string text = (Protocol ?? "") + " " + ExternalPort + " -> " + (InternalClient ?? "") + ":" + InternalPort;
+                return string.IsNullOrWhiteSpace(Description) ? text : text + " (" + Description + ")";
+            }
+        }
+    }
+
+    public class RouterSnapshot
+    {
+        /// <summary>True when a router answered UPnP. Many have it switched off, which is fine.</summary>
+        public bool Found { get; set; }
+        public string ExternalIp { get; set; }
+        public string Note { get; set; }
+        public List<ForwardInfo> Forwards { get; set; }
+
+        public RouterSnapshot()
+        {
+            Forwards = new List<ForwardInfo>();
+            ExternalIp = "";
+            Note = "";
+        }
+    }
+
+    [DataContract]
+    public class LogMarker
+    {
+        [DataMember(Name = "log", Order = 1)] public string Log { get; set; }
+        [DataMember(Name = "sinceUtc", Order = 2)] public string SinceUtc { get; set; }
+    }
+
+    /// <summary>A user-defined detection in rules.json.</summary>
+    [DataContract]
+    public class CustomRule
+    {
+        [DataMember(Name = "enabled", Order = 1)] public bool Enabled { get; set; }
+        [DataMember(Name = "log", Order = 2)] public string Log { get; set; }
+        [DataMember(Name = "id", Order = 3)] public int Id { get; set; }
+        [DataMember(Name = "contains", Order = 4)] public string Contains { get; set; }
+        [DataMember(Name = "technique", Order = 5)] public string Technique { get; set; }
+        [DataMember(Name = "severity", Order = 6)] public string Severity { get; set; }
+        [DataMember(Name = "message", Order = 7)] public string Message { get; set; }
+    }
+
+    /// <summary>Something that starts by itself: a Run key entry, a startup shortcut, a service or a scheduled task.</summary>
+    public class AutorunItem
+    {
+        public string Kind { get; set; }
+        public string Name { get; set; }
+        public string Command { get; set; }
+        public string Technique { get; set; }
+        public bool IsNew { get; set; }
+
+        /// <summary>Identity used for the baseline. Services and tasks are keyed by name only because
+        /// their paths change with ordinary updates. Run entries include the command.</summary>
+        public string Key
+        {
+            get
+            {
+                return Kind == "run" ? Kind + "|" + Name + "|" + Command : Kind + "|" + Name;
+            }
+        }
+    }
+
+    public class ProxmoxGuest
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public string Kind { get; set; }
+        public string Status { get; set; }
+        public string Cpu { get; set; }
+        public string Memory { get; set; }
+        public bool Running { get; set; }
+    }
+
+    /// <summary>What the Proxmox API returned on one scan.</summary>
+    public class ProxmoxSnapshot
+    {
+        public bool Configured { get; set; }
+        public bool Ok { get; set; }
+        public string Error { get; set; }
+        public string Summary { get; set; }
+        public string Thumbprint { get; set; }
+        public bool CertChanged { get; set; }
+        public List<ProxmoxGuest> Guests { get; set; }
+
+        public ProxmoxSnapshot()
+        {
+            Guests = new List<ProxmoxGuest>();
+            Error = "";
+            Summary = "";
+            Thumbprint = "";
+        }
+    }
+
+    public class SyslogMessage
+    {
+        public DateTime Time { get; set; }
+        public string Source { get; set; }
+        public int Severity { get; set; }
+        public string Text { get; set; }
+    }
+
+    public class PortHit
+    {
+        public int Port { get; set; }
+        public string Service { get; set; }
+    }
+
+    /// <summary>One line of history.csv: what a single scan saw.</summary>
+    public class HistoryPoint
+    {
+        public DateTime Time { get; set; }
+        public int Online { get; set; }
+        public int Unknown { get; set; }
+        public bool Elevated { get; set; }
+        public int HighEvents { get; set; }
+        public Dictionary<string, bool> Hosts { get; set; }
+
+        public HistoryPoint()
+        {
+            Hosts = new Dictionary<string, bool>();
+        }
+    }
+}
