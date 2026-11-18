@@ -48,6 +48,7 @@ namespace SecHUD
         public static string RemovedLogPath { get { return Path.Combine(QuarantineDir, "removed.log"); } }
         public static string RemovedPath { get { return Path.Combine(QuarantineDir, "removed.json"); } }
         public static string WindowPath { get { return Path.Combine(Dir, "window.json"); } }
+        public static string SummaryPath { get { return Path.Combine(Dir, "summary.json"); } }
 
         public static void EnsureDir()
         {

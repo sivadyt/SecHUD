@@ -68,6 +68,9 @@ static partial class Tests
             LiveAndQuietInTheWindow();
             UpdateInstall();
             SetupProgram();
+            TrustNotes();
+            GuestDevices();
+            WeeklySummary();
             PlatformTests();
         }
         catch (Exception ex)
@@ -1014,6 +1017,285 @@ static partial class Tests
             Updater.Downloader = realDownloader;
             Updater.AppDirOverride = null;
         }
+    }
+}
+
+static partial class Tests
+{
+    static void TrustNotes()
+    {
+        string rest;
+        Check("the program is picked out of a command line, quoted or not",
+            Trust.ExtractPath("\"C:\\Program Files\\Chat\\chat.exe\" --tray", out rest) == "C:\\Program Files\\Chat\\chat.exe" && rest == "--tray"
+            && Trust.ExtractPath("C:\\Program Files\\Chat\\chat.exe /min", out rest) == "C:\\Program Files\\Chat\\chat.exe" && rest == "/min"
+            && Trust.ExtractPath("rundll32.exe shell32.dll,Control_RunDLL", out rest) == "rundll32.exe" && rest == "shell32.dll,Control_RunDLL"
+            && Trust.ExtractPath("notepad", out rest) == "notepad" && rest == ""
+            && Trust.ExtractPath("", out rest) == "" && Trust.ExtractPath(null, out rest) == "");
+        Check("the path styles Windows services use are understood",
+            Trust.ExtractPath("\\??\\C:\\Drivers\\thing.sys", out rest) == "C:\\Drivers\\thing.sys"
+            && Trust.ExtractPath("\\SystemRoot\\System32\\drivers\\x.sys", out rest).EndsWith("\\System32\\drivers\\x.sys") && !Trust.ExtractPath("\\SystemRoot\\System32\\drivers\\x.sys", out rest).StartsWith("\\SystemRoot")
+            && Trust.ExtractPath("System32\\svchost.exe -k netsvcs", out rest).EndsWith("\\System32\\svchost.exe") && rest == "-k netsvcs");
+        Check("unusual places for a startup program are named",
+            Trust.LocationWarning("C:\\Users\\ty\\AppData\\Local\\Temp\\x.exe") == "a temp folder" && Trust.LocationWarning("C:\\Users\\ty\\Downloads\\x.exe") == "the Downloads folder"
+            && Trust.LocationWarning("C:\\Users\\Public\\x.exe") == "the Public folder" && Trust.LocationWarning("C:\\Users\\ty\\Desktop\\x.exe") == "the Desktop"
+            && Trust.LocationWarning("C:\\Program Files\\Chat\\chat.exe") == "" && Trust.LocationWarning("C:\\Windows\\System32\\notepad.exe") == "" && Trust.LocationWarning(null) == "");
+
+        Func<string, SignatureInfo> realReader = Trust.SignatureReader;
+        Func<string, bool> realExists = Trust.FileExists;
+        Func<string, string> realShortcut = Trust.ShortcutResolver, realDll = Trust.ServiceDllReader, realTask = Trust.TaskActionReader;
+        try
+        {
+            // A made-up PC: which files exist and what their signatures are.
+            var signatures = new Dictionary<string, SignatureInfo>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "C:\\Program Files\\Chat\\chat.exe", new SignatureInfo { State = SignatureInfo.Trusted, Signer = "Chat Company Inc." } },
+                { "C:\\Users\\ty\\AppData\\Local\\Temp\\updater.exe", new SignatureInfo { State = SignatureInfo.None } },
+                { "C:\\Tools\\hobby.exe", new SignatureInfo { State = SignatureInfo.None } },
+                { "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", new SignatureInfo { State = SignatureInfo.Trusted, Signer = "Microsoft Windows" } },
+                { "C:\\Program Files\\Patched\\app.exe", new SignatureInfo { State = SignatureInfo.Broken, Signer = "Real Vendor" } },
+                { "C:\\Program Files\\Odd\\odd.exe", new SignatureInfo { State = SignatureInfo.Untrusted, Signer = "Self Made" } },
+                { "C:\\Users\\ty\\Downloads\\signed.exe", new SignatureInfo { State = SignatureInfo.Trusted, Signer = "Chat Company Inc." } },
+                { "C:\\Windows\\System32\\svchost.exe", new SignatureInfo { State = SignatureInfo.Trusted, Signer = "Microsoft Windows" } },
+                { "C:\\Windows\\System32\\good.dll", new SignatureInfo { State = SignatureInfo.Trusted, Signer = "Microsoft Windows" } },
+                { "C:\\Users\\ty\\AppData\\Local\\Temp\\run.vbs", new SignatureInfo() },
+                { "C:\\Scripts\\backup.bat", new SignatureInfo() }
+            };
+            Trust.FileExists = path => signatures.ContainsKey(path);
+            Trust.SignatureReader = path => signatures[path];
+            Trust.ShortcutResolver = link => link.EndsWith("chat.lnk") ? "\"C:\\Program Files\\Chat\\chat.exe\" --tray" : "";
+            Trust.ServiceDllReader = name => name == "GoodSvc" ? "C:\\Windows\\System32\\good.dll" : "";
+            Trust.TaskActionReader = name => name == "\\Updater" ? "\"C:\\Users\\ty\\AppData\\Local\\Temp\\updater.exe\" /silent" : "";
+            Trust.ClearCache();
+
+            TrustNote signed = Trust.DescribeCommand("\"C:\\Program Files\\Chat\\chat.exe\" --tray");
+            Check("a signed program in a normal place reads as fine, with who signed it", signed.Level == TrustNote.Ok && signed.Text == "Signed by Chat Company Inc., and Windows trusts the signature." && signed.Short == "signed by Chat Company Inc.");
+
+            TrustNote temp = Trust.DescribeCommand("C:\\Users\\ty\\AppData\\Local\\Temp\\updater.exe /silent");
+            Check("not signed and in a temp folder is a warning", temp.Level == TrustNote.Warn && temp.Text.StartsWith("Not signed, and it runs from a temp folder.") && temp.Short == "not signed, in a temp folder");
+
+            TrustNote hobby = Trust.DescribeCommand("C:\\Tools\\hobby.exe");
+            Check("not signed in an ordinary place is only a caution, and says why", hobby.Level == TrustNote.Caution && hobby.Text.Contains("Many small programs are not") && hobby.Short == "not signed");
+
+            TrustNote shell = Trust.DescribeCommand("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -enc SQBFAFgA");
+            Check("PowerShell is never passed off as simply signed by Microsoft", shell.Level == TrustNote.Caution && shell.Text.Contains("runs whatever the rest of the command tells it to") && shell.Text.Contains("Read the command itself") && !shell.Text.StartsWith("Signed by") && shell.Short == "runs a command through powershell.exe");
+
+            TrustNote broken = Trust.DescribeCommand("\"C:\\Program Files\\Patched\\app.exe\"");
+            TrustNote untrusted = Trust.DescribeCommand("\"C:\\Program Files\\Odd\\odd.exe\"");
+            Check("a broken or untrusted signature is a warning", broken.Level == TrustNote.Warn && broken.Text.Contains("changed after Real Vendor signed it") && untrusted.Level == TrustNote.Warn && untrusted.Text.Contains("Windows does not trust"));
+
+            TrustNote odd = Trust.DescribeCommand("C:\\Users\\ty\\Downloads\\signed.exe");
+            Check("signed but running from Downloads is worth a second look", odd.Level == TrustNote.Caution && odd.Text.Contains("the Downloads folder") && odd.Short == "signed by Chat Company Inc., in the Downloads folder");
+
+            TrustNote missing = Trust.DescribeCommand("\"C:\\Gone\\gone.exe\"");
+            Check("an entry whose file is gone says so", missing.Level == TrustNote.Caution && missing.Text.Contains("is not there") && missing.Short == "its file is missing" && Trust.DescribeCommand("") == null && Trust.DescribeCommand(null) == null);
+
+            TrustNote script = Trust.DescribeCommand("C:\\Scripts\\backup.bat");
+            TrustNote tempScript = Trust.DescribeCommand("\"C:\\Users\\ty\\AppData\\Local\\Temp\\run.vbs\"");
+            Check("a script is called a script, and one in a temp folder is a warning", script.Level == TrustNote.Caution && script.Text.StartsWith("A script, not a program") && tempScript.Level == TrustNote.Warn && tempScript.Short == "a script in a temp folder");
+
+            TrustNote viaShortcut = Trust.Describe(new AutorunItem { Kind = "startup", Name = "chat.lnk", Command = "C:\\Users\\ty\\Startup\\chat.lnk" });
+            TrustNote deadShortcut = Trust.Describe(new AutorunItem { Kind = "startup", Name = "dead.lnk", Command = "C:\\Users\\ty\\Startup\\dead.lnk" });
+            Check("a startup shortcut is judged by the program it points to", viaShortcut.Level == TrustNote.Ok && viaShortcut.Short == "signed by Chat Company Inc." && deadShortcut.Level == TrustNote.Caution);
+
+            TrustNote hosted = Trust.Describe(new AutorunItem { Kind = "service", Name = "GoodSvc", Command = "C:\\Windows\\System32\\svchost.exe -k netsvcs" });
+            TrustNote hostedUnknown = Trust.Describe(new AutorunItem { Kind = "service", Name = "MysterySvc", Command = "C:\\Windows\\System32\\svchost.exe -k netsvcs" });
+            Check("a service inside the Windows service host is judged by its own file", hosted.Level == TrustNote.Ok && hosted.Text == "Runs inside the Windows service host. Its own file: signed by Microsoft Windows, and Windows trusts the signature." && hostedUnknown.Level == TrustNote.Caution);
+
+            TrustNote task = Trust.Describe(new AutorunItem { Kind = "task", Name = "\\Updater", Command = "" });
+            Check("a scheduled task is judged by the program it runs", task.Level == TrustNote.Warn && task.Short == "not signed, in a temp folder" && Trust.Describe(new AutorunItem { Kind = "task", Name = "\\Unknown", Command = "" }) == null && Trust.Describe(null) == null);
+
+            int reads = 0;
+            Trust.SignatureReader = path => { reads++; return signatures[path]; };
+            Trust.ClearCache();
+            var item = new AutorunItem { Kind = "run", Name = "HKCU\\Hobby", Command = "C:\\Tools\\hobby.exe" };
+            Trust.Describe(item); Trust.Describe(item); Trust.Describe(item);
+            Check("a note is worked out once and then remembered", reads == 1);
+
+            Trust.SignatureReader = path => { throw new InvalidOperationException("boom"); };
+            Trust.ClearCache();
+            Check("if Windows cannot answer, there is simply no note", Trust.Describe(new AutorunItem { Kind = "run", Name = "HKCU\\X", Command = "C:\\Tools\\hobby.exe" }) == null);
+        }
+        finally
+        {
+            Trust.SignatureReader = realReader;
+            Trust.FileExists = realExists;
+            Trust.ShortcutResolver = realShortcut;
+            Trust.ServiceDllReader = realDll;
+            Trust.TaskActionReader = realTask;
+            Trust.ClearCache();
+        }
+
+        if (Path.DirectorySeparatorChar == '\\')
+        {
+            // The real thing, on real Windows files.
+            string notepad = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "notepad.exe");
+            SignatureInfo windowsFile = Trust.SignatureReader(notepad);
+            Console.WriteLine("        notepad.exe: " + windowsFile.State + " / " + windowsFile.Signer);
+            Check("a file that is part of Windows is recognised as signed by Microsoft", windowsFile.State == SignatureInfo.Trusted && windowsFile.Signer.Contains("Microsoft"));
+
+            string self = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            SignatureInfo unsignedFile = Trust.SignatureReader(self);
+            Check("this test program, which nobody signed, reads as not signed", unsignedFile.State == SignatureInfo.None && unsignedFile.Signer == "");
+
+            TrustNote live = Trust.DescribeCommand("notepad.exe");
+            Console.WriteLine("        note for 'notepad.exe': " + (live == null ? "none" : live.Level + " / " + live.Text));
+            Check("a bare program name is found and described", live != null && live.Level == TrustNote.Ok && live.Text.StartsWith("Signed by Microsoft"));
+
+            string dotnet = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe");
+            if (File.Exists(dotnet))
+            {
+                SignatureInfo embedded = Trust.SignatureReader(dotnet);
+                string tampered = Path.Combine(Store.Dir, "tampered-copy.exe");
+                byte[] bytes = File.ReadAllBytes(dotnet);
+                bytes[bytes.Length / 2] ^= 0xFF;
+                File.WriteAllBytes(tampered, bytes);
+                SignatureInfo changed = Trust.SignatureReader(tampered);
+                File.Delete(tampered);
+                Console.WriteLine("        dotnet.exe: " + embedded.State + " / " + embedded.Signer + "   changed copy: " + changed.State);
+                Check("a program with its own signature names its signer", embedded.State == SignatureInfo.Trusted && embedded.Signer.Contains("Microsoft"));
+                Check("changing one byte of a signed program breaks its signature", changed.State == SignatureInfo.Broken || changed.State == SignatureInfo.Untrusted);
+            }
+        }
+    }
+
+    static void GuestDevices()
+    {
+        const string pc = "B8-27-EB-00-00-03", phone = "DA-A1-19-00-00-07", laptop = "00-0C-29-00-00-08", oldPhone = "DE-00-00-00-00-01";
+        Func<string, string> realResolver = Scanner.NameResolver;
+        Scanner.NameResolver = ip => "";
+        try
+        {
+            File.Delete(Store.DevicesPath);
+            DateTime now = DateTime.Now;
+            var config = AppConfig.CreateDefault();
+            var events = new List<EventEntry>();
+            List<DeviceRecord> devices;
+            Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+
+            events.Clear();
+            CheckRow strict = Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2", phone, "192.168.1.60"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("by default a phone with a private address is flagged like any new device", strict.IsAlert && strict.Value == "2 | 1 unknown" && events.Count(e => e.Type == "new-device" && e.Severity == "high") == 1 && !devices.Any(d => d.Guest));
+
+            // Same network, with guest handling switched on.
+            File.Delete(Store.DevicesPath);
+            config.GuestPrivate = true;
+            Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            events.Clear();
+            CheckRow relaxed = Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2", phone, "192.168.1.60", laptop, "192.168.1.61"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("with guests on, the phone is listed quietly and the laptop still alerts", relaxed.IsAlert && relaxed.Value == "3 | 1 unknown | 1 guest"
+                && events.Count(e => e.Severity == "high") == 1 && events.Any(e => e.Severity == "high" && e.Msg.Contains("192.168.1.61"))
+                && events.Any(e => e.Type == "guest-device" && e.Severity == "info" && e.Msg == "guest device joined: 192.168.1.60 " + phone + " (private address)")
+                && devices.First(d => d.Mac == phone).Guest && !devices.First(d => d.Mac == laptop).Guest && !devices.First(d => d.Mac == phone).Approved);
+
+            events.Clear();
+            CheckRow approveAll = Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2", phone, "192.168.1.60", laptop, "192.168.1.61"), "192.168.1.2", "192.168.1.1", true, events, now, out devices);
+            Check("Approve all accepts what was flagged and leaves guests as guests", !approveAll.IsAlert && approveAll.Value == "3 | 0 unknown | 1 guest" && devices.First(d => d.Mac == laptop).Approved && !devices.First(d => d.Mac == phone).Approved);
+
+            // A guest from two weeks ago that never came back, and one the owner approved.
+            devices.Add(new DeviceRecord { Mac = oldPhone, Ip = "192.168.1.90", Name = "", Approved = false, FirstSeen = now.AddDays(-20).ToString("s"), LastSeen = now.AddDays(-14).ToString("s") });
+            devices.First(d => d.Mac == phone).Approved = true;
+            Store.Save(Store.DevicesPath, devices);
+            CheckRow pruned = Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("a guest that has not been back for a week drops off the list", !devices.Any(d => d.Mac == oldPhone) && pruned.Value == "1 | 0 unknown");
+            Check("an approved phone is a known device, not a guest, and is kept", devices.Any(d => d.Mac == phone && d.Approved && !d.Guest));
+
+            devices.Add(new DeviceRecord { Mac = oldPhone, Ip = "192.168.1.90", Name = "", Approved = false, LastSeen = now.AddDays(-14).ToString("s") });
+            Store.Save(Store.DevicesPath, devices);
+            Scanner.EvaluateLan(config, null, null, null, false, events, now, out devices);
+            Check("nothing is dropped while this PC is off the network", devices.Any(d => d.Mac == oldPhone));
+            config.GuestPrivate = false;
+            CheckRow strictAgain = Scanner.EvaluateLan(config, Seen(pc, "192.168.1.2"), "192.168.1.2", "192.168.1.1", false, events, now, out devices);
+            Check("switching guests off flags them again and keeps them listed", strictAgain.IsAlert && strictAgain.Value == "1 | 1 unknown" && devices.Any(d => d.Mac == oldPhone && !d.Guest));
+
+            var vm = new MainViewModel();
+            var apply = typeof(MainViewModel).GetMethod("Apply", BindingFlags.NonPublic | BindingFlags.Instance);
+            ScanResult result = SampleResult();
+            result.NewEvents.Clear();
+            result.Devices.First(d => !d.Approved).Guest = true;
+            result.Autoruns[0].Note = new TrustNote { Level = TrustNote.Warn, Text = "Not signed, and it runs from a temp folder.", Short = "not signed, in a temp folder" };
+            apply.Invoke(vm, new object[] { result });
+            Check("the window shows GUEST and does not count it as unknown", vm.Devices[0].Status == "GUEST" && vm.DeviceSummary == "DEVICES (3)");
+            Check("a new startup item shows its note, and an approved one does not", vm.Autoruns[0].HasNote && vm.Autoruns[0].Note == "NOT SIGNED, AND IT RUNS FROM A TEMP FOLDER." && vm.Autoruns[0].NoteLevel == "warn" && !vm.Autoruns[1].HasNote);
+
+            ScanResult later = SampleResult();
+            later.NewEvents.Clear();
+            later.Devices.RemoveAll(d => !d.Approved);
+            apply.Invoke(vm, new object[] { later });
+            Check("a device dropped from the list leaves the window too", vm.Devices.Count == 2 && vm.DeviceSummary == "DEVICES (2)");
+        }
+        finally
+        {
+            Scanner.NameResolver = realResolver;
+        }
+    }
+
+    static void WeeklySummary()
+    {
+        var now = new DateTime(2026, 11, 18, 18, 0, 0);
+        Func<int, string, string, string, EventEntry> ev = (daysAgo, type, severity, msg) => new EventEntry { Ts = now.AddDays(-daysAgo).ToString("s"), Type = type, Severity = severity, Msg = msg };
+        var events = new List<EventEntry>
+        {
+            ev(1, "new-device", "high", "new device 192.168.1.47"), ev(2, "new-device", "high", "new device 192.168.1.48"),
+            ev(3, "new-autorun", "high", "new run autorun: HKCU\\X"), ev(4, "detection", "high", "new local user account: x"),
+            ev(5, "mystery", "high", "something else"), ev(1, "approve", "info", "approved device"), ev(1, "level", "info", "status changed"),
+            ev(9, "new-device", "high", "too old to count"), new EventEntry { Ts = "not a date", Type = "new-device", Severity = "high" }, null
+        };
+        var devices = new List<DeviceRecord>
+        {
+            new DeviceRecord { Mac = "B8-27-EB-00-00-01", Approved = true, LastSeen = now.AddDays(-1).ToString("s") },
+            new DeviceRecord { Mac = "B8-27-EB-00-00-02", Approved = true, LastSeen = now.AddDays(-30).ToString("s") },
+            new DeviceRecord { Mac = "B8-27-EB-00-00-03", Approved = false, LastSeen = now.ToString("s") },
+            new DeviceRecord { Mac = "DA-00-00-00-00-04", Approved = false, Guest = true, LastSeen = now.ToString("s") }
+        };
+        string busy = Summary.Build(events, devices, "ELEVATED", 1, now, "TYSPC", "0.8.3");
+        Check("the weekly summary counts the week's alerts by kind", busy.StartsWith("SecHUD weekly summary for TYSPC (Nov 11 to Nov 18)") && busy.Contains("Status now: ELEVATED")
+            && busy.Contains("Alerts this week: 5 (2 new devices, 1 new startup item, 1 detection, 1 other)"));
+        Check("it says what is still waiting, and how many devices were around", busy.Contains("Waiting for you: 1 open detection, 1 unknown device") && busy.Contains("Devices: 2 known, 3 seen this week") && busy.EndsWith("SecHUD 0.8.3 is running and watching.") && !busy.Contains("quiet week"));
+
+        string quiet = Summary.Build(new List<EventEntry>(), devices.Take(2).ToList(), "NOMINAL", 0, now, "TYSPC", "0.8.3");
+        Check("a quiet week says so in plain words", quiet.Contains("Alerts this week: 0") && !quiet.Contains("Alerts this week: 0 (") && quiet.Contains("Waiting for you: nothing") && quiet.Contains("A quiet week. Nothing new showed up.")
+            && Summary.Build(null, null, null, 0, now, "PC", "1.0.0").Contains("Status now: unknown"));
+
+        DateTime utc = now.ToUniversalTime();
+        Check("the summary is due after seven days, not before", Summary.IsDue(utc.AddDays(-8).ToString("s") + "Z", utc) && Summary.IsDue(utc.AddDays(-7).ToString("s") + "Z", utc) && !Summary.IsDue(utc.AddDays(-6).ToString("s") + "Z", utc)
+            && Summary.IsDue("", utc) && Summary.IsDue(null, utc) && Summary.IsDue("garbage", utc));
+
+        // In the window: the first look only starts the clock.
+        File.Delete(Store.SummaryPath);
+        var vm = new MainViewModel();
+        var apply = typeof(MainViewModel).GetMethod("Apply", BindingFlags.NonPublic | BindingFlags.Instance);
+        var posted = new List<string>();
+        vm.DiscordPoster = (hook, text) => posted.Add(text);
+        vm.MaybeSendWeeklySummary(DateTime.Now);
+        bool nothingBeforeScan = posted.Count == 0 && !File.Exists(Store.SummaryPath);
+
+        ScanResult result = SampleResult();
+        result.NewEvents.Clear();
+        result.Config.DiscordWebhookProtected = Secrets.Protect("https://discord.com/api/webhooks/1/abc");
+        apply.Invoke(vm, new object[] { result });
+        vm.MaybeSendWeeklySummary(DateTime.Now.AddMinutes(11));
+        Check("the first week only starts the clock", nothingBeforeScan && posted.Count == 0 && File.Exists(Store.SummaryPath));
+
+        vm.MaybeSendWeeklySummary(DateTime.Now.AddDays(3));
+        bool notYet = posted.Count == 0;
+        vm.MaybeSendWeeklySummary(DateTime.Now.AddDays(7).AddHours(1));
+        Check("a week later it is sent, once", notYet && posted.Count == 1 && posted[0].StartsWith("SecHUD weekly summary for") && posted[0].Contains("Status now: ELEVATED"));
+        vm.MaybeSendWeeklySummary(DateTime.Now.AddDays(7).AddHours(2));
+        vm.MaybeSendWeeklySummary(DateTime.Now.AddDays(8));
+        Check("and not again until another week has passed", posted.Count == 1);
+
+        result.Config.WeeklySummary = false;
+        vm.MaybeSendWeeklySummary(DateTime.Now.AddDays(30));
+        result.Config.WeeklySummary = true;
+        result.Config.QuietHours = true; result.Config.QuietStart = "00:00"; result.Config.QuietEnd = "23:59";
+        vm.MaybeSendWeeklySummary(DateTime.Now.Date.AddDays(40).AddHours(12));
+        Check("it respects the off switch and quiet hours", posted.Count == 1);
+
+        result.Config.QuietHours = false;
+        vm.SendSummaryCommand.Execute(null);
+        Check("Send summary now sends it straight away", posted.Count == 2 && vm.SettingsStatus.StartsWith("SUMMARY SENT"));
+        var saved = Store.FromJson<AppConfig>(Store.ToJson(AppConfig.CreateDefault()));
+        Check("guests are off and the weekly summary is on unless you change them", !saved.GuestPrivate && saved.GuestDays == 7 && saved.WeeklySummary);
     }
 }
 

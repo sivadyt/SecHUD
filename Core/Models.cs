@@ -49,6 +49,18 @@ namespace SecHUD
         [DataMember(Name = "quietStart", Order = 25)] public string QuietStart { get; set; }
         [DataMember(Name = "quietEnd", Order = 26)] public string QuietEnd { get; set; }
 
+        /// <summary>
+        /// Devices using a made-up private address (most phones and tablets) are listed as guests
+        /// and do not raise an alert. Off by default: an intruder's phone looks the same.
+        /// </summary>
+        [DataMember(Name = "guestPrivate", Order = 28)] public bool GuestPrivate { get; set; }
+
+        /// <summary>How many days an unapproved guest stays in the list after it was last seen.</summary>
+        [DataMember(Name = "guestDays", Order = 29)] public int GuestDays { get; set; }
+
+        /// <summary>Send one Discord message a week with what happened, so a quiet app still shows it is working.</summary>
+        [DataMember(Name = "weeklySummary", Order = 30)] public bool WeeklySummary { get; set; }
+
         /// <summary>False until the first-run welcome has been answered.</summary>
         [DataMember(Name = "welcomed", Order = 27)] public bool Welcomed { get; set; }
 
@@ -98,6 +110,9 @@ namespace SecHUD
             QuietStart = "23:00";
             QuietEnd = "07:00";
             Welcomed = false;
+            GuestPrivate = false;
+            GuestDays = 7;
+            WeeklySummary = true;
         }
 
         public static AppConfig CreateDefault()
@@ -124,6 +139,7 @@ namespace SecHUD
             if (DiscordWebhookProtected == null) DiscordWebhookProtected = "";
             if (HomeWifiName == null) HomeWifiName = "";
             if (WatchMisses < 1 || WatchMisses > 20) WatchMisses = 2;
+            if (GuestDays < 1 || GuestDays > 365) GuestDays = 7;
             int minutes;
             if (!Quiet.TryParseTime(QuietStart, out minutes)) QuietStart = "23:00";
             if (!Quiet.TryParseTime(QuietEnd, out minutes)) QuietEnd = "07:00";
@@ -150,6 +166,9 @@ namespace SecHUD
 
         /// <summary>True when the device answered during the latest scan. Not saved.</summary>
         [IgnoreDataMember] public bool Online { get; set; }
+
+        /// <summary>True for an unapproved device with a private address while guest handling is on. Not saved.</summary>
+        [IgnoreDataMember] public bool Guest { get; set; }
     }
 
     /// <summary>One line of events.log.</summary>
@@ -356,6 +375,13 @@ namespace SecHUD
         [DataMember(Name = "restored", Order = 8)] public bool Restored { get; set; }
     }
 
+    /// <summary>When the weekly Discord summary last went out. Stored in summary.json.</summary>
+    [DataContract]
+    public class SummaryState
+    {
+        [DataMember(Name = "lastSentUtc", Order = 1)] public string LastSentUtc { get; set; }
+    }
+
     /// <summary>The window's size, remembered between runs. Stored in window.json.</summary>
     [DataContract]
     public class WindowPlacement
@@ -385,6 +411,39 @@ namespace SecHUD
         [DataMember(Name = "message", Order = 7)] public string Message { get; set; }
     }
 
+    /// <summary>What Windows says about the signature on one file.</summary>
+    public class SignatureInfo
+    {
+        public const string Trusted = "trusted";      // signed, and Windows trusts the signature
+        public const string Untrusted = "untrusted";  // signed, but the signature does not check out
+        public const string Broken = "broken";        // the file was changed after it was signed
+        public const string None = "none";            // no signature at all
+
+        public string State { get; set; }
+        public string Signer { get; set; }
+
+        public SignatureInfo()
+        {
+            State = None;
+            Signer = "";
+        }
+    }
+
+    /// <summary>A plain-language note about a startup item, to help decide between Approve and Deny.</summary>
+    public class TrustNote
+    {
+        public const string Ok = "ok";
+        public const string Caution = "caution";
+        public const string Warn = "warn";
+
+        public string Level { get; set; }
+        /// <summary>One or two short sentences for the window.</summary>
+        public string Text { get; set; }
+        /// <summary>A few words for the alert, such as "not signed, runs from a temp folder".</summary>
+        public string Short { get; set; }
+        public string Path { get; set; }
+    }
+
     /// <summary>Something that starts by itself: a Run key entry, a startup shortcut, a service or a scheduled task.</summary>
     public class AutorunItem
     {
@@ -393,6 +452,9 @@ namespace SecHUD
         public string Command { get; set; }
         public string Technique { get; set; }
         public bool IsNew { get; set; }
+
+        /// <summary>For new items: what is known about the program behind it (signed, by whom, where it lives).</summary>
+        public TrustNote Note { get; set; }
 
         /// <summary>Identity used for the baseline. Services and tasks are keyed by name only because
         /// their paths change with ordinary updates. Run entries include the command.</summary>

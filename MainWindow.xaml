@@ -238,6 +238,10 @@
                                         <Border BorderBrush="{StaticResource AccentFaintBrush}" BorderThickness="0,1,0,0">
                                             <Grid MinHeight="32">
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="84"/><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/><ColumnDefinition Width="232"/></Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions><RowDefinition MinHeight="32"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Text="{Binding Note}" Style="{StaticResource TrustText}" Margin="0,0,14,8"
+                                                           Visibility="{Binding HasNote, Converter={StaticResource BoolToVis}}"
+                                                           ToolTip="What SecHUD could find out about the program behind this item. A signature shows who made a program, not that it is good, so use it as one clue."/>
                                                 <TextBlock Grid.Column="0" Text="{Binding Kind}" Style="{StaticResource CellText}" Foreground="{StaticResource CyanBrush}"/>
                                                 <TextBlock Grid.Column="1" Text="{Binding Name}" Style="{StaticResource CellText}" Margin="0,0,14,0" ToolTip="{Binding Name}"/>
                                                 <TextBlock Grid.Column="2" Text="{Binding Command}" Style="{StaticResource CellText}" Foreground="{StaticResource MutedBrush}" Margin="0,0,14,0" ToolTip="{Binding Command}"/>
@@ -488,6 +492,8 @@
                                 <CheckBox Style="{StaticResource HudCheck}" IsChecked="{Binding SetLiveWatch}" Content="Live watch: check this PC the moment something on it changes"/>
                                 <TextBlock Style="{StaticResource HintText}" Margin="26,-4,0,10" Text="Windows tells SecHUD when a startup entry, service, scheduled task, account, listening port, firewall or antivirus setting changes, and the alert arrives within a second or two. With this off, changes are found on the next scan. Devices joining the network are always found by the scan."/>
                                 <CheckBox Style="{StaticResource HudCheck}" IsChecked="{Binding SetScanLan}" Content="Sweep the LAN for devices"/>
+                                <CheckBox Style="{StaticResource HudCheck}" IsChecked="{Binding SetGuestPrivate}" Content="Treat phones with a private address as guests (no alert)"/>
+                                <TextBlock Style="{StaticResource HintText}" Margin="26,-4,0,10" Text="Most phones and tablets make up their own address for each network. With this on, a new one is listed as GUEST and does not raise an alert, and it drops off the list a week after it was last seen. Handy if you often have visitors. Leave it off if you want to hear about every new device: a stranger's phone looks exactly the same."/>
                                 <CheckBox Style="{StaticResource HudCheck}" IsChecked="{Binding SetWatchAutoruns}" Content="Watch autoruns (run keys, startup, services, tasks)"/>
                                 <CheckBox Style="{StaticResource HudCheck}" IsChecked="{Binding SetWatchRouter}" Content="Ask the router which ports it forwards (UPnP). Shows the Router tab."/>
                                 <CheckBox Style="{StaticResource HudCheck}" IsChecked="{Binding SetNotify}" Content="Show Windows notifications for alerts"/>
@@ -521,6 +527,10 @@
                                     <Button Grid.Column="2" Style="{StaticResource SmallButton}" Content="SEND TEST" Margin="10,0,0,0" Command="{Binding TestDiscordCommand}"/>
                                 </Grid>
                                 <TextBlock Style="{StaticResource HintText}" Margin="230,4,0,0" Text="Leave blank to keep the saved one. Type NONE to remove it. It is stored encrypted."/>
+                                <CheckBox Style="{StaticResource HudCheck}" Margin="0,12,0,8" IsChecked="{Binding SetWeeklySummary}" Content="Send a weekly summary, so a quiet week still shows SecHUD is working"/>
+                                <StackPanel Orientation="Horizontal" Margin="26,0,0,4">
+                                    <Button Style="{StaticResource SmallButton}" Content="SEND SUMMARY NOW" Command="{Binding SendSummaryCommand}" ToolTip="Sends this week's summary to Discord straight away, so you can see what it looks like."/>
+                                </StackPanel>
                                 <CheckBox Style="{StaticResource HudCheck}" Margin="0,12,0,8" IsChecked="{Binding SetQuietHours}" Content="Quiet hours: hold ordinary Discord alerts and send one summary afterwards"/>
                                 <Grid Margin="0,0,0,2">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="230"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>

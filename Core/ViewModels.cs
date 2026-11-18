@@ -71,6 +71,7 @@ namespace SecHUD
         private string openPorts = "";
         private bool watched;
         private bool down;
+        private bool guest;
 
         public DeviceViewModel(MainViewModel owner, DeviceRecord record)
         {
@@ -113,6 +114,13 @@ namespace SecHUD
         }
 
         public string WatchLabel { get { return watched ? "WATCHING" : "WATCH"; } }
+
+        /// <summary>An unapproved device with a private address, while guests are not flagged.</summary>
+        public bool Guest
+        {
+            get { return guest; }
+            set { if (Set(ref guest, value)) Raise("Status"); }
+        }
 
         public string Ip { get { return ip; } private set { Set(ref ip, value); } }
         public string LastSeen { get { return lastSeen; } private set { Set(ref lastSeen, value); } }
@@ -169,7 +177,7 @@ namespace SecHUD
         {
             get
             {
-                if (!approved) return "UNKNOWN";
+                if (!approved) return guest ? "GUEST" : "UNKNOWN";
                 if (online) return "ONLINE";
                 return watched && down ? "DOWN" : "OFFLINE";
             }
@@ -197,6 +205,7 @@ namespace SecHUD
             Online = record.Online;
             Watched = record.Watched;
             Down = record.Down;
+            Guest = record.Guest;
             LastSeen = MainViewModel.ShortTime(record.LastSeen);
             // The name is left alone once shown, so a scan never overwrites what is being typed.
         }
@@ -245,6 +254,14 @@ namespace SecHUD
         public string Kind { get; set; }
         public string Name { get; set; }
         public string Command { get; set; }
+
+        /// <summary>For a new item: what is known about the program behind it, in plain words.</summary>
+        public string Note { get; set; }
+        /// <summary>ok, caution or warn. Decides the colour of the note.</summary>
+        public string NoteLevel { get; set; }
+        /// <summary>The note as written, for the Deny question.</summary>
+        public string NoteText { get; set; }
+        public bool HasNote { get { return IsNew && !string.IsNullOrEmpty(Note); } }
     }
 
     /// <summary>A startup item that was denied and can be put back.</summary>
@@ -360,6 +377,9 @@ namespace SecHUD
         private bool showLogsTab;
         private bool hasRemoved;
         private bool setLiveWatch = true;
+        private bool setGuestPrivate;
+        private bool setWeeklySummary = true;
+        private DateTime lastSummaryCheck = DateTime.MinValue;
         private bool setQuietHours;
         private string setQuietStart = "23:00";
         private string setQuietEnd = "07:00";
@@ -453,6 +473,7 @@ namespace SecHUD
             OpenUpdateCommand = new RelayCommand(o => BeginUpdate());
             CheckUpdatesCommand = new RelayCommand(o => { var ignored = CheckForUpdateAsync(true); });
             FinishWelcomeCommand = new RelayCommand(o => FinishWelcome());
+            SendSummaryCommand = new RelayCommand(o => SendSummaryNow());
 
             syslog.Received += OnSyslogReceived;
             live.Changed += OnLiveChanged;
@@ -474,6 +495,7 @@ namespace SecHUD
         public ObservableCollection<RemovedViewModel> Removed { get; private set; }
 
         public ICommand FinishWelcomeCommand { get; private set; }
+        public ICommand SendSummaryCommand { get; private set; }
         public ICommand ScanCommand { get; private set; }
         public ICommand ApproveAllCommand { get; private set; }
         public ICommand OpenConfigCommand { get; private set; }
@@ -579,6 +601,8 @@ namespace SecHUD
         public bool SetWatchWifi { get { return setWatchWifi; } set { Set(ref setWatchWifi, value); } }
         public bool SetWatchRouter { get { return setWatchRouter; } set { Set(ref setWatchRouter, value); } }
         public bool SetLiveWatch { get { return setLiveWatch; } set { Set(ref setLiveWatch, value); } }
+        public bool SetGuestPrivate { get { return setGuestPrivate; } set { Set(ref setGuestPrivate, value); } }
+        public bool SetWeeklySummary { get { return setWeeklySummary; } set { Set(ref setWeeklySummary, value); } }
         public bool SetQuietHours { get { return setQuietHours; } set { Set(ref setQuietHours, value); } }
         public string SetQuietStart { get { return setQuietStart; } set { Set(ref setQuietStart, value); } }
         public string SetQuietEnd { get { return setQuietEnd; } set { Set(ref setQuietEnd, value); } }
@@ -819,7 +843,64 @@ namespace SecHUD
                 await Task.Delay(1500);
                 try { DrainPending(); } catch (Exception ex) { Store.LogError("pump", ex); }
                 try { FlushHeldAlerts(DateTime.Now); } catch (Exception ex) { Store.LogError("quiet hours", ex); }
+                try { MaybeSendWeeklySummary(DateTime.Now); } catch (Exception ex) { Store.LogError("weekly summary", ex); }
             }
+        }
+
+        // ---- weekly summary ----
+
+        /// <summary>The summary as it would be sent right now.</summary>
+        public string BuildSummary(DateTime now)
+        {
+            ScanResult latest = lastResult;
+            return Summary.Build(Store.ReadRecentEvents(5000),
+                latest == null ? new List<DeviceRecord>() : latest.Devices,
+                Level, latest == null ? 0 : latest.OpenDetections.Count,
+                now, Environment.MachineName, Updater.CurrentVersion.ToString(3));
+        }
+
+        /// <summary>
+        /// Sends the weekly summary once seven days have passed since the last one. The first
+        /// time it only starts the clock, so nobody gets a summary of a week that has not happened.
+        /// It waits for quiet hours to end. Looked at every ten minutes, not on every tick.
+        /// </summary>
+        public void MaybeSendWeeklySummary(DateTime now)
+        {
+            if ((now - lastSummaryCheck).TotalMinutes < 10) return;
+            lastSummaryCheck = now;
+            if (lastResult == null || !config.WeeklySummary || Quiet.IsQuiet(config, now)) return;
+            string webhook = Secrets.Unprotect(config.DiscordWebhookProtected);
+            if (webhook.Length == 0) return;
+
+            SummaryState state = Store.Load<SummaryState>(Store.SummaryPath);
+            DateTime nowUtc = now.ToUniversalTime();
+            if (state == null || string.IsNullOrEmpty(state.LastSentUtc))
+            {
+                Store.Save(Store.SummaryPath, new SummaryState { LastSentUtc = nowUtc.ToString("s") + "Z" });
+                return;
+            }
+            if (!Summary.IsDue(state.LastSentUtc, nowUtc)) return;
+
+            Store.Save(Store.SummaryPath, new SummaryState { LastSentUtc = nowUtc.ToString("s") + "Z" });
+            PostToDiscord(webhook, BuildSummary(now));
+        }
+
+        /// <summary>The Send summary now button: the same message, straight away, without moving the weekly clock.</summary>
+        private void SendSummaryNow()
+        {
+            string webhook = Secrets.Unprotect(config.DiscordWebhookProtected);
+            if (webhook.Length == 0)
+            {
+                SettingsStatus = "SAVE A DISCORD WEBHOOK FIRST";
+                return;
+            }
+            if (lastResult == null)
+            {
+                SettingsStatus = "WAIT FOR THE FIRST SCAN TO FINISH";
+                return;
+            }
+            PostToDiscord(webhook, BuildSummary(DateTime.Now));
+            SettingsStatus = "SUMMARY SENT. CHECK YOUR DISCORD CHANNEL.";
         }
 
         // ---- live watch ----
@@ -984,7 +1065,14 @@ namespace SecHUD
                 int current = Devices.IndexOf(ordered[i]);
                 if (current != i) Devices.Move(current, i);
             }
-            int unknown = Devices.Count(d => d.IsUnknown);
+            // A device that was dropped from the list (a guest that never came back) leaves the screen too.
+            var stillListed = new HashSet<string>(result.IsQuick ? deviceIndex.Keys : result.Devices.Select(d => d.Mac), StringComparer.OrdinalIgnoreCase);
+            foreach (DeviceViewModel gone in Devices.Where(d => !stillListed.Contains(d.Mac)).ToList())
+            {
+                Devices.Remove(gone);
+                deviceIndex.Remove(gone.Mac);
+            }
+            int unknown = Devices.Count(d => d.IsUnknown && !d.Guest);
             DeviceSummary = "DEVICES (" + Devices.Count + ")" + (unknown > 0 ? " " + unknown + " UNKNOWN" : "");
 
             Ports.Clear();
@@ -998,14 +1086,20 @@ namespace SecHUD
             // The autorun list can hold hundreds of rows, so it is only rebuilt when something in it changed.
             int freshAutoruns = result.Autoruns.Count(a => a.IsNew);
             string signature = result.Autoruns.Count + "/" + freshAutoruns + "/"
-                + result.Autoruns.Aggregate(17, (hash, a) => unchecked(hash * 31 + (a.Key ?? "").GetHashCode() + (a.IsNew ? 1 : 0)));
+                + result.Autoruns.Aggregate(17, (hash, a) => unchecked(hash * 31 + (a.Key ?? "").GetHashCode() + (a.IsNew ? 1 : 0) + (a.Note == null ? 0 : 2)));
             if (signature != autorunSignature)
             {
                 autorunSignature = signature;
                 Autoruns.Clear();
                 foreach (AutorunItem a in result.Autoruns.OrderByDescending(x => x.IsNew).ThenBy(x => x.Kind).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
                 {
-                    Autoruns.Add(new AutorunViewModel(this) { Key = a.Key, RawKind = a.Kind ?? "", Kind = (a.Kind ?? "").ToUpperInvariant(), Name = a.Name ?? "", Command = a.Command ?? "", IsNew = a.IsNew });
+                    Autoruns.Add(new AutorunViewModel(this)
+                    {
+                        Key = a.Key, RawKind = a.Kind ?? "", Kind = (a.Kind ?? "").ToUpperInvariant(), Name = a.Name ?? "", Command = a.Command ?? "", IsNew = a.IsNew,
+                        Note = a.Note == null ? "" : (a.Note.Text ?? "").ToUpperInvariant(),
+                        NoteText = a.Note == null ? "" : (a.Note.Text ?? ""),
+                        NoteLevel = a.Note == null ? "" : (a.Note.Level ?? "")
+                    });
                 }
             }
             AutorunSummary = "AUTORUNS (" + Autoruns.Count + ")" + (freshAutoruns > 0 ? " " + freshAutoruns + " NEW" : "");
@@ -1485,6 +1579,7 @@ namespace SecHUD
             string question = "Remove this startup item from Windows?\n\n"
                 + item.Kind + ":  " + item.Name + "\n"
                 + (string.IsNullOrEmpty(item.Command) ? "" : item.Command + "\n")
+                + (string.IsNullOrEmpty(item.NoteText) ? "" : "\n" + item.NoteText + "\n")
                 + "\nA record is kept, and the Restore button under the list puts it back.";
             if (Confirm == null || !Confirm(question)) return;
 
@@ -1675,6 +1770,8 @@ namespace SecHUD
             SetWatchRouter = config.WatchRouter;
             SetCheckUpdates = config.CheckUpdates;
             SetLiveWatch = config.LiveWatch;
+            SetGuestPrivate = config.GuestPrivate;
+            SetWeeklySummary = config.WeeklySummary;
             SetQuietHours = config.QuietHours;
             SetQuietStart = config.QuietStart;
             SetQuietEnd = config.QuietEnd;
@@ -1744,6 +1841,8 @@ namespace SecHUD
                 updated.WatchRouter = SetWatchRouter;
                 updated.CheckUpdates = SetCheckUpdates;
                 updated.LiveWatch = SetLiveWatch;
+                updated.GuestPrivate = SetGuestPrivate;
+                updated.WeeklySummary = SetWeeklySummary;
                 updated.Welcomed = true;
 
                 int minutes;

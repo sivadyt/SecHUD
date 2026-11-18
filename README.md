@@ -113,6 +113,11 @@ using the public IEEE registry (packed into the exe, nothing is looked up online
 tablets and laptops often invent an address for each network to make tracking harder. Those
 read PRIVATE ADDRESS, because no maker owns them.
 
+Have visitors often? Settings has "Treat phones with a private address as guests". With it on,
+a new private-address device is listed as GUEST without an alert, and it drops off the list a
+week after it was last seen. It is off by default, because a stranger's phone looks the same
+as a friend's. Approve a guest to keep it as a known device.
+
 Press Watch on a device you care about, such as a camera, doorbell or NAS. If it misses two
 sweeps in a row you get an alert, and another line when it is back. Phones go quiet whenever
 they sleep, so watching one mostly tells you when its screen is off.
@@ -139,6 +144,23 @@ they sleep, so watching one mostly tells you when its screen is off.
 
 High detections stay open, and keep the status ELEVATED, until you dismiss them. Every flagged
 row has its own Approve or Dismiss button. Approve all accepts everything at once.
+
+A new startup item also gets a short note saying what SecHUD could find out about the program
+behind it:
+
+| Note | What it means |
+|---|---|
+| Signed by (name), and Windows trusts the signature | The maker is known. Cyan. |
+| Not signed | Nobody vouches for it. Common for small hobby programs. Yellow. |
+| Not signed, and it runs from a temp folder | Programs you installed on purpose rarely look like this. Red. |
+| The signature is broken | The file was changed after it was signed. Red. |
+| Starts powershell.exe (or cmd, rundll32, mshta...) | A Windows tool that runs whatever the rest of the command says. The signature tells you nothing here, so read the command. Yellow. |
+| A script, not a program | Scripts cannot be signed this way. Open it in Notepad. |
+| The file it points to is not there | Usually left over from something that was removed. |
+
+A signature shows who made a program, not that the program is good, so treat the note as one
+clue. For shortcuts, services and scheduled tasks the note is about the program they really
+run. The check is done by Windows itself and nothing is looked up online.
 
 Flagged autoruns also have a Deny button, which removes the item from Windows after asking you
 to confirm. Nothing is thrown away: a Run entry is recorded with its command, a startup file is
@@ -232,6 +254,12 @@ access the events missed in the meantime (up to two days) are still reported.
 **Discord alerts.** In Discord: channel settings, Integrations, Webhooks, New Webhook, Copy Webhook
 URL. Paste it in Settings and press Send test.
 
+**Weekly summary.** With a webhook saved, SecHUD sends one message a week: the status, how many
+alerts there were and of what kind, anything still waiting for you, and how many devices were
+around. A monitor that is working well is silent for days, and this is how you know it has not
+simply stopped. The first one arrives a week after you set it up. Send summary now in Settings
+shows you one straight away, and the checkbox next to it switches the weekly one off.
+
 **Quiet hours.** Switch them on in Settings and give a start and end time (24-hour clock, for
 example 23:00 until 07:00). Ordinary alerts, such as a new device or startup item, are held and
 sent as one summary when quiet hours end. Urgent ones still arrive straight away: protection
@@ -301,7 +329,8 @@ leaves your network. Exported reports leave out your public address.
 | `Core/Syslog.cs`, `Core/Proxmox.cs`, `Core/Discord.cs`, `Core/PortScanner.cs` | Network integrations |
 | `Core/Wifi.cs`, `Core/Upnp.cs` | Wi-Fi access points and router port forwards |
 | `Core/Vendors.cs`, `Data/oui.gz` | Device makers by MAC address (the public IEEE registry) |
-| `Core/Quiet.cs` | Quiet hours for Discord |
+| `Core/Quiet.cs`, `Core/Summary.cs` | Quiet hours and the weekly summary for Discord |
+| `Core/Trust.cs` | The "is this safe?" note: signatures and file locations |
 | `Core/Updater.cs` | The check for a newer release, and the one-click update |
 | `Core/History.cs`, `Core/Report.cs` | History file, charts data and HTML export |
 | `Core/Store.cs`, `Core/Secrets.cs`, `Core/Models.cs` | Storage, DPAPI secrets, data types |

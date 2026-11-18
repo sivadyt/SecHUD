@@ -321,7 +321,7 @@ namespace SecHUD
                 {
                     Time = now,
                     Online = devices.Count(d => d.Online),
-                    Unknown = devices.Count(d => !d.Approved),
+                    Unknown = devices.Count(d => !d.Approved && !d.Guest),
                     Elevated = elevated,
                     HighEvents = highNow + pendingHighEvents
                 };
@@ -569,8 +569,13 @@ namespace SecHUD
 
                 foreach (AutorunItem item in fresh)
                 {
+                    // What is behind it: signed or not, by whom, and where the file lives.
+                    item.Note = Trust.Describe(item);
                     if (!state.NewAutoruns.Contains(item.Key, StringComparer.OrdinalIgnoreCase))
-                        AddEvent(events, now, "new-autorun", "high", "new " + item.Kind + " autorun: " + item.Name, item.Technique);
+                    {
+                        string about = item.Note == null || string.IsNullOrEmpty(item.Note.Short) ? "" : " (" + item.Note.Short + ")";
+                        AddEvent(events, now, "new-autorun", "high", "new " + item.Kind + " autorun: " + item.Name + about, item.Technique);
+                    }
                 }
                 return new CheckRow(label, autoruns.Count + " | " + fresh.Count + " new", fresh.Count > 0, fresh.Count == 0);
             }
@@ -999,7 +1004,10 @@ namespace SecHUD
                         if (!firstRun)
                         {
                             string who = name.Length > 0 ? pair.Value + " (" + name + ")" : pair.Value;
-                            AddEvent(events, now, "new-device", "high", "new device " + who + " " + pair.Key + MakerNote(pair.Key));
+                            if (config.GuestPrivate && Vendors.IsRandomized(pair.Key))
+                                AddEvent(events, now, "guest-device", "info", "guest device joined: " + who + " " + pair.Key + " (private address)");
+                            else
+                                AddEvent(events, now, "new-device", "high", "new device " + who + " " + pair.Key + MakerNote(pair.Key));
                         }
                     }
 
@@ -1027,11 +1035,28 @@ namespace SecHUD
                     }
                 }
 
+                // Guests: unapproved devices with a private address, while that setting is on. They are
+                // listed but not flagged, and a guest that has not been back for a while is dropped,
+                // so phones that keep inventing new addresses do not pile up.
+                foreach (DeviceRecord d in devices) d.Guest = IsGuest(config, d);
+                if (found != null && config.GuestPrivate)
+                {
+                    DateTime cutoff = now.AddDays(-config.GuestDays);
+                    devices.RemoveAll(d =>
+                    {
+                        DateTime seen;
+                        return d.Guest && !d.Online && !d.Watched
+                            && DateTime.TryParse(d.LastSeen, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out seen)
+                            && seen < cutoff;
+                    });
+                }
+
                 int approvedNow = 0;
                 if (approve)
                 {
                     foreach (DeviceRecord d in devices)
                     {
+                        if (d.Guest) continue; // guests are not flagged, so Approve all leaves them as guests
                         if (!d.Approved) { d.Approved = true; approvedNow++; }
                     }
                     if (approvedNow > 0) AddEvent(events, now, "approve", "info", "approved " + approvedNow + " device(s)");
@@ -1041,9 +1066,10 @@ namespace SecHUD
                 if (found != null || approvedNow > 0) Store.Save(Store.DevicesPath, devices);
             }
 
-            int unknown = devices.Count(d => !d.Approved);
+            int unknown = devices.Count(d => !d.Approved && !d.Guest);
             int down = devices.Count(d => d.Watched && d.Down);
-            string tail = down > 0 ? " | " + down + " down" : "";
+            int guests = devices.Count(d => d.Guest && d.Online);
+            string tail = (guests > 0 ? " | " + guests + (guests == 1 ? " guest" : " guests") : "") + (down > 0 ? " | " + down + " down" : "");
             bool alert = unknown > 0 || down > 0;
             if (found == null)
             {
@@ -1054,6 +1080,12 @@ namespace SecHUD
 
             int online = devices.Count(d => d.Online);
             return new CheckRow(label, online + " | " + unknown + " unknown" + tail, alert, !alert);
+        }
+
+        /// <summary>An unapproved device with a made-up private address, while guest handling is switched on.</summary>
+        public static bool IsGuest(AppConfig config, DeviceRecord device)
+        {
+            return config != null && config.GuestPrivate && device != null && !device.Approved && Vendors.IsRandomized(device.Mac);
         }
 
         private static string Describe(DeviceRecord d)

@@ -3,6 +3,16 @@
 The newest version is at the top. The text under each version is what people see in the app
 when an update is available.
 
+## 0.8.3
+
+- **"Is this safe?" notes.** A new startup item now says what is behind it in plain words:
+  who signed the program, whether Windows trusts that signature, and whether it runs from an
+  odd place such as a temp folder. The same few words are added to the alert.
+- **Guests.** A new setting lists phones and tablets that use a private address as GUEST
+  without raising an alert. Off unless you switch it on.
+- **Weekly summary.** If Discord alerts are set up, SecHUD sends one message a week with what
+  happened, so a quiet week still shows it is working. Settings has a button to see one now.
+
 ## 0.8.2
 
 - **An installer.** New here? Under Assets below, download `SecHUD-Setup.exe` and run it. A small

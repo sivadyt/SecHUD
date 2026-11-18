@@ -99,6 +99,157 @@ namespace SecHUD
             return names;
         }
 
+        // ---- file signatures ----
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustFileInfo
+        {
+            public uint cbStruct;
+            [MarshalAs(UnmanagedType.LPWStr)] public string pcwszFilePath;
+            public IntPtr hFile;
+            public IntPtr pgKnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WinTrustData
+        {
+            public uint cbStruct;
+            public IntPtr pPolicyCallbackData;
+            public IntPtr pSIPClientData;
+            public uint dwUIChoice;
+            public uint fdwRevocationChecks;
+            public uint dwUnionChoice;
+            public IntPtr pFile;
+            public uint dwStateAction;
+            public IntPtr hWVTStateData;
+            public IntPtr pwszURLReference;
+            public uint dwProvFlags;
+            public uint dwUIContext;
+            public IntPtr pSignatureSettings;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct CatalogInfo
+        {
+            public uint cbStruct;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string wszCatalogFile;
+        }
+
+        [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+        private static extern int WinVerifyTrust(IntPtr hwnd, ref Guid actionId, ref WinTrustData data);
+
+        [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CryptCATAdminAcquireContext2(out IntPtr catAdmin, IntPtr subsystem,
+            [MarshalAs(UnmanagedType.LPWStr)] string hashAlgorithm, IntPtr strongHashPolicy, uint flags);
+
+        [DllImport("wintrust.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CryptCATAdminCalcHashFromFileHandle2(IntPtr catAdmin, SafeFileHandle file,
+            ref uint hashSize, [Out] byte[] hash, uint flags);
+
+        [DllImport("wintrust.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr CryptCATAdminEnumCatalogFromHash(IntPtr catAdmin, byte[] hash, uint hashSize,
+            uint flags, IntPtr previous);
+
+        [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CryptCATCatalogInfoFromContext(IntPtr catInfo, ref CatalogInfo info, uint flags);
+
+        [DllImport("wintrust.dll", ExactSpelling = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CryptCATAdminReleaseCatalogContext(IntPtr catAdmin, IntPtr catInfo, uint flags);
+
+        [DllImport("wintrust.dll", ExactSpelling = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CryptCATAdminReleaseContext(IntPtr catAdmin, uint flags);
+
+        /// <summary>
+        /// Asks Windows whether the signature inside a file is valid and trusted. Returns 0 for
+        /// yes, otherwise the Windows error code. No window is shown and nothing is fetched from
+        /// the internet: revocation is checked from what this PC already has cached.
+        /// </summary>
+        internal static int VerifyFileSignature(string path)
+        {
+            const uint uiNone = 2, revokeNone = 0, choiceFile = 1, stateIgnore = 0;
+            const uint cacheOnlyUrlRetrieval = 0x1000;
+            var action = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE"); // the standard "is this file signed" check
+
+            var file = new WinTrustFileInfo { cbStruct = (uint)Marshal.SizeOf(typeof(WinTrustFileInfo)), pcwszFilePath = path };
+            IntPtr filePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WinTrustFileInfo)));
+            try
+            {
+                Marshal.StructureToPtr(file, filePointer, false);
+                var data = new WinTrustData
+                {
+                    cbStruct = (uint)Marshal.SizeOf(typeof(WinTrustData)),
+                    dwUIChoice = uiNone,
+                    fdwRevocationChecks = revokeNone,
+                    dwUnionChoice = choiceFile,
+                    pFile = filePointer,
+                    dwStateAction = stateIgnore,
+                    dwProvFlags = cacheOnlyUrlRetrieval
+                };
+                return WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+            }
+            finally
+            {
+                Marshal.DestroyStructure(filePointer, typeof(WinTrustFileInfo));
+                Marshal.FreeHGlobal(filePointer);
+            }
+        }
+
+        /// <summary>The catalog file that vouches for this file, or null when no installed catalog lists it.</summary>
+        internal static string FindCatalogFor(string path)
+        {
+            foreach (string algorithm in new[] { "SHA256", null }) // null = the older SHA-1 catalogs
+            {
+                IntPtr admin;
+                try
+                {
+                    if (!CryptCATAdminAcquireContext2(out admin, IntPtr.Zero, algorithm, IntPtr.Zero, 0)) continue;
+                }
+                catch
+                {
+                    return null;
+                }
+                try
+                {
+                    using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                        System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete))
+                    {
+                        uint size = 0;
+                        CryptCATAdminCalcHashFromFileHandle2(admin, stream.SafeFileHandle, ref size, null, 0);
+                        if (size == 0 || size > 128) continue;
+                        var hash = new byte[size];
+                        if (!CryptCATAdminCalcHashFromFileHandle2(admin, stream.SafeFileHandle, ref size, hash, 0)) continue;
+
+                        IntPtr catalog = CryptCATAdminEnumCatalogFromHash(admin, hash, size, 0, IntPtr.Zero);
+                        if (catalog == IntPtr.Zero) continue;
+                        try
+                        {
+                            var info = new CatalogInfo { cbStruct = (uint)Marshal.SizeOf(typeof(CatalogInfo)) };
+                            if (CryptCATCatalogInfoFromContext(catalog, ref info, 0) && !string.IsNullOrEmpty(info.wszCatalogFile))
+                                return info.wszCatalogFile;
+                        }
+                        finally
+                        {
+                            CryptCATAdminReleaseCatalogContext(admin, catalog, 0);
+                        }
+                    }
+                }
+                catch
+                {
+                    // A file that cannot be opened simply has no answer.
+                }
+                finally
+                {
+                    CryptCATAdminReleaseContext(admin, 0);
+                }
+            }
+            return null;
+        }
+
         private const int AfInet = 2;
         private const int TcpTableOwnerPidListener = 3;
 

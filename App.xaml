@@ -334,6 +334,22 @@
             </Style.Triggers>
         </Style>
 
+        <!-- The note under a new startup item: cyan when it looks fine, yellow for a closer look, red for a warning -->
+        <Style x:Key="TrustText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource HazardBrush}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding NoteLevel}" Value="ok">
+                    <Setter Property="Foreground" Value="{StaticResource CyanBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding NoteLevel}" Value="warn">
+                    <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
         <Style x:Key="HintText" TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
             <Setter Property="FontSize" Value="11"/>
