@@ -21,6 +21,8 @@ namespace SecHUD
             viewModel.AlertRaised += OnAlert;
             viewModel.UpdateFound += OnUpdateFound;
             viewModel.Confirm = AskYesNo;
+            viewModel.Ask = AskFriendly;
+            viewModel.RestartRequested += OnRestartRequested;
             viewModel.ShowMessage = ShowInfo;
             viewModel.PropertyChanged += OnViewModelChanged;
             RestorePlacement();
@@ -151,6 +153,12 @@ namespace SecHUD
                    == MessageBoxResult.Yes;
         }
 
+        private bool AskFriendly(string question)
+        {
+            return MessageBox.Show(this, question, "SecHUD", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.Yes)
+                   == MessageBoxResult.Yes;
+        }
+
         private void ShowInfo(string text)
         {
             MessageBox.Show(this, text, "SecHUD", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -214,6 +222,33 @@ namespace SecHUD
         private void OnTrayScan(object sender, EventArgs e)
         {
             viewModel.ScanCommand.Execute(null);
+        }
+
+        /// <summary>Shown by App right after an update restarted the program.</summary>
+        public void AnnounceUpdated()
+        {
+            viewModel.AnnounceUpdated();
+        }
+
+        /// <summary>The new version is in place: start it, then close this copy. The new one waits for this one to go.</summary>
+        private void OnRestartRequested(string exePath)
+        {
+            try
+            {
+                var app = Application.Current as App;
+                if (app != null) app.ReleaseInstanceLock();
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exePath, "--after-update")
+                {
+                    UseShellExecute = false,
+                    WorkingDirectory = System.IO.Path.GetDirectoryName(exePath) ?? ""
+                });
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("restart after update", ex);
+                ShowInfo("The update is installed, but SecHUD could not start itself again.\n\nPlease open SecHUD again.");
+            }
+            OnTrayExit(this, EventArgs.Empty);
         }
 
         private void OnTrayExit(object sender, EventArgs e)

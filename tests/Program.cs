@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -64,6 +65,7 @@ static partial class Tests
             RestoreDenied();
             LiveWatchHelpers();
             LiveAndQuietInTheWindow();
+            UpdateInstall();
             PlatformTests();
         }
         catch (Exception ex)
@@ -799,6 +801,217 @@ static partial class Tests
         fresh.FinishWelcomeCommand.Execute(null);
         Check("a bad webhook on the welcome screen is explained, and it stays open", fresh.ShowWelcome && fresh.WelcomeStatus.Contains("NOT A DISCORD WEBHOOK") && !fresh.IsScanning);
         fresh.Shutdown();
+    }
+}
+
+static partial class Tests
+{
+    static byte[] FakeProgram(string marker)
+    {
+        var bytes = new byte[4096];
+        bytes[0] = (byte)'M'; bytes[1] = (byte)'Z';
+        Encoding.ASCII.GetBytes(marker).CopyTo(bytes, 64);
+        return bytes;
+    }
+
+    static string MakeZip(string path, params object[] nameThenBytes)
+    {
+        if (File.Exists(path)) File.Delete(path);
+        using (var stream = new FileStream(path, FileMode.CreateNew))
+        using (var zip = new ZipArchive(stream, ZipArchiveMode.Create))
+        {
+            for (int i = 0; i + 1 < nameThenBytes.Length; i += 2)
+            {
+                ZipArchiveEntry entry = zip.CreateEntry((string)nameThenBytes[i]);
+                byte[] content = (byte[])nameThenBytes[i + 1];
+                using (Stream output = entry.Open()) output.Write(content, 0, content.Length);
+            }
+        }
+        return path;
+    }
+
+    static void UpdateInstall()
+    {
+        const string baseUrl = "https://github.com/sivadyt/SecHUD/releases/download/v0.9.0/";
+        string digest = new string('a', 64);
+        string json = "{\"tag_name\":\"v0.9.0\",\"html_url\":\"https://github.com/sivadyt/SecHUD/releases/tag/v0.9.0\",\"body\":\"New things.\",\"draft\":false,\"prerelease\":false,\"assets\":["
+            + "{\"name\":\"SecHUD-v0.9.0.sha256.txt\",\"size\":85,\"digest\":\"sha256:" + new string('b', 64) + "\",\"browser_download_url\":\"" + baseUrl + "SecHUD-v0.9.0.sha256.txt\"},"
+            + "{\"name\":\"SecHUD-v0.9.0.zip\",\"size\":430666,\"digest\":\"sha256:" + digest + "\",\"browser_download_url\":\"" + baseUrl + "SecHUD-v0.9.0.zip\"}]}";
+        UpdateInfo info = Updater.ParseRelease(json, new Version(0, 8, 0));
+        Check("a release's zip and checksum are found by their exact names", info != null && info.CanInstall && info.ZipUrl == baseUrl + "SecHUD-v0.9.0.zip" && info.HashUrl == baseUrl + "SecHUD-v0.9.0.sha256.txt" && info.Digest == digest);
+
+        UpdateInfo elsewhere = Updater.ParseRelease(json.Replace("https://github.com/sivadyt/SecHUD/releases/download/", "https://evil.example/sivadyt/SecHUD/releases/download/"), new Version(0, 8, 0));
+        UpdateInfo noZip = Updater.ParseRelease(json.Replace("SecHUD-v0.9.0.zip\",\"size", "Something-else.zip\",\"size"), new Version(0, 8, 0));
+        UpdateInfo noChecksum = Updater.ParseRelease("{\"tag_name\":\"v0.9.0\",\"draft\":false,\"prerelease\":false,\"assets\":[{\"name\":\"SecHUD-v0.9.0.zip\",\"browser_download_url\":\"" + baseUrl + "SecHUD-v0.9.0.zip\"}]}", new Version(0, 8, 0));
+        Check("a download from anywhere but this project's releases is never installed", elsewhere != null && !elsewhere.CanInstall && elsewhere.ZipUrl == "" && noZip != null && !noZip.CanInstall);
+        Check("a release with no checksum is not installed by itself", noChecksum != null && noChecksum.ZipUrl.Length > 0 && !noChecksum.CanInstall);
+        Check("download addresses are held to this project's release files",
+            Updater.SafeDownloadUrl(baseUrl + "SecHUD-v0.9.0.zip") == baseUrl + "SecHUD-v0.9.0.zip"
+            && Updater.SafeDownloadUrl("http://github.com/sivadyt/SecHUD/releases/download/v0.9.0/x.zip") == ""
+            && Updater.SafeDownloadUrl("https://github.com/someone-else/SecHUD/releases/download/v0.9.0/x.zip") == ""
+            && Updater.SafeDownloadUrl("https://github.com.evil.example/sivadyt/SecHUD/releases/download/v0.9.0/x.zip") == ""
+            && Updater.SafeDownloadUrl("https://github.com/sivadyt/SecHUD/archive/main.zip") == ""
+            && Updater.SafeDownloadUrl("https://user@github.com/sivadyt/SecHUD/releases/download/v0.9.0/x.zip") == ""
+            && Updater.SafeDownloadUrl("https://github.com/sivadyt/SecHUD/releases/download/v0.9.0/x.zip?to=elsewhere") == ""
+            && Updater.SafeDownloadUrl("https://github.com:8443/sivadyt/SecHUD/releases/download/v0.9.0/x.zip") == ""
+            && Updater.SafeDownloadUrl(null) == "" && Updater.SafeDownloadUrl("") == "");
+
+        string upper = new string('A', 60) + "0f9E";
+        Check("a checksum file is read whatever its layout", Updater.ParseHash(upper + "  SecHUD-v0.9.0.zip\r\n") == upper.ToLowerInvariant() && Updater.ParseHash(" " + upper + " *file") == upper.ToLowerInvariant()
+            && Updater.ParseHash("not a hash") == "" && Updater.ParseHash(new string('a', 63)) == "" && Updater.ParseHash(new string('g', 64)) == "" && Updater.ParseHash(null) == "");
+
+        string scratch = Path.Combine(Store.Dir, "update-test");
+        if (Directory.Exists(scratch)) Directory.Delete(scratch, true);
+        Directory.CreateDirectory(scratch);
+        string abc = Path.Combine(scratch, "abc.txt");
+        File.WriteAllText(abc, "abc");
+        Check("SHA-256 is computed correctly", Updater.Sha256File(abc) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+        // A release zip with the real files plus things that have no business being there.
+        byte[] newExe = FakeProgram("new program");
+        string zip = MakeZip(Path.Combine(scratch, "release.zip"),
+            "SecHUD.exe", newExe, "README.md", Encoding.UTF8.GetBytes("new readme"),
+            "../escape.txt", Encoding.UTF8.GetBytes("x"), "..\\escape2.txt", Encoding.UTF8.GetBytes("x"),
+            "sub/SecHUD.exe", FakeProgram("wrong one"), "extra.dll", new byte[10], "sechud.EXE", FakeProgram("duplicate"));
+        string unpacked = Path.Combine(scratch, "unpacked");
+        string error;
+        bool unpackedOk = Updater.Unpack(zip, unpacked, out error);
+        Check("only the program's own files are taken out of the zip", unpackedOk && Directory.GetFiles(unpacked).Select(Path.GetFileName).OrderBy(n => n).SequenceEqual(new[] { "README.md", "SecHUD.exe" })
+            && File.ReadAllBytes(Path.Combine(unpacked, "SecHUD.exe")).SequenceEqual(newExe) && Directory.GetDirectories(unpacked).Length == 0
+            && !File.Exists(Path.Combine(scratch, "escape.txt")) && !File.Exists(Path.Combine(scratch, "escape2.txt")));
+        string noExe = MakeZip(Path.Combine(scratch, "no-exe.zip"), "README.md", Encoding.UTF8.GetBytes("x"));
+        Check("a zip without the program, or a file that is not a zip, is refused", !Updater.Unpack(noExe, Path.Combine(scratch, "u2"), out error) && error.Contains("does not contain")
+            && !Updater.Unpack(abc, Path.Combine(scratch, "u3"), out error) && error.Contains("could not be unpacked"));
+
+        Func<string, string> realReader = Updater.VersionReader;
+        Func<string, string, long, Action<int>, string> realDownloader = Updater.Downloader;
+        try
+        {
+            Updater.VersionReader = path => "0.9.0.0";
+            string exe = Path.Combine(unpacked, "SecHUD.exe");
+            bool rightVersion = Updater.VerifyExe(exe, "0.9.0", out error);
+            bool wrongVersion = !Updater.VerifyExe(exe, "0.9.1", out error);
+            Updater.VersionReader = path => null;
+            bool noVersion = !Updater.VerifyExe(exe, "0.9.0", out error);
+            Updater.VersionReader = path => "0.9.0.0";
+            Check("the new program must be exactly the version the release says", rightVersion && wrongVersion && noVersion && !Updater.VerifyExe(abc, "0.9.0", out error) && error.Contains("not a Windows program"));
+
+            // "Downloads" are served from local files, so nothing here touches the network.
+            string served = zip;
+            string servedHash = Updater.Sha256File(zip) + "  SecHUD-v0.9.0.zip";
+            var asked = new List<string>();
+            Updater.Downloader = (url, path, max, progress) =>
+            {
+                asked.Add(url);
+                if (url.EndsWith(".zip")) { File.Copy(served, path, true); if (progress != null) progress(100); }
+                else File.WriteAllText(path, servedHash);
+                return "";
+            };
+            var good = new UpdateInfo { Version = "0.9.0", ZipUrl = baseUrl + "SecHUD-v0.9.0.zip", HashUrl = baseUrl + "SecHUD-v0.9.0.sha256.txt", Digest = Updater.Sha256File(zip) };
+            var steps = new List<string>();
+            string staged;
+            bool prepared = Updater.Prepare(good, steps.Add, out staged, out error);
+            Check("a release that matches its checksum is downloaded and unpacked", prepared && File.Exists(Path.Combine(staged, "SecHUD.exe")) && asked.Count == 2 && steps.Contains("DOWNLOADING UPDATE 100%") && steps.Contains("CHECKING THE DOWNLOAD..."));
+
+            servedHash = new string('0', 64) + "  SecHUD-v0.9.0.zip";
+            bool badFile = !Updater.Prepare(good, null, out staged, out error);
+            string badFileError = error;
+            servedHash = Updater.Sha256File(zip) + "  SecHUD-v0.9.0.zip";
+            var badDigest = new UpdateInfo { Version = "0.9.0", ZipUrl = good.ZipUrl, HashUrl = good.HashUrl, Digest = new string('1', 64) };
+            bool badApi = !Updater.Prepare(badDigest, null, out staged, out error);
+            Check("a download that does not match either checksum is thrown away", badFile && badFileError.Contains("does not match") && badApi && error.Contains("does not match") && staged == "");
+
+            var wrongPlace = new UpdateInfo { Version = "0.9.0", ZipUrl = "https://evil.example/SecHUD-v0.9.0.zip", Digest = good.Digest };
+            int before = asked.Count;
+            Check("nothing is fetched for a release from the wrong place, or with no checksum", !Updater.Prepare(wrongPlace, null, out staged, out error) && !Updater.Prepare(new UpdateInfo { Version = "0.9.0", ZipUrl = good.ZipUrl }, null, out staged, out error) && !Updater.Prepare(null, null, out staged, out error) && asked.Count == before);
+            Updater.Downloader = (url, path, max, progress) => "could not reach GitHub";
+            Check("a failed download is reported, not installed", !Updater.Prepare(good, null, out staged, out error) && error == "could not reach GitHub");
+
+            // The swap: the running program cannot be overwritten, so it is set aside and replaced.
+            string app = Path.Combine(scratch, "app");
+            Directory.CreateDirectory(app);
+            File.WriteAllBytes(Path.Combine(app, "SecHUD.exe"), FakeProgram("old program"));
+            File.WriteAllText(Path.Combine(app, "README.md"), "old readme");
+            File.WriteAllText(Path.Combine(app, "notes-of-mine.txt"), "mine");
+            bool installed = Updater.Install(unpacked, app, out error);
+            Check("the new files take the place of the old ones, which are set aside", installed && File.ReadAllBytes(Path.Combine(app, "SecHUD.exe")).SequenceEqual(newExe) && File.ReadAllText(Path.Combine(app, "README.md")) == "new readme"
+                && File.ReadAllBytes(Path.Combine(app, "SecHUD.exe.old")).SequenceEqual(FakeProgram("old program")) && File.ReadAllText(Path.Combine(app, "notes-of-mine.txt")) == "mine");
+            Check("installing a second time replaces the files set aside earlier", Updater.Install(unpacked, app, out error) && File.ReadAllBytes(Path.Combine(app, "SecHUD.exe.old")).SequenceEqual(newExe));
+            Directory.CreateDirectory(Updater.WorkDir);
+            Updater.CleanupAfterUpdate(app);
+            Check("the next start clears away what the update left behind", !File.Exists(Path.Combine(app, "SecHUD.exe.old")) && !File.Exists(Path.Combine(app, "README.md.old")) && !Directory.Exists(Updater.WorkDir) && File.Exists(Path.Combine(app, "SecHUD.exe")) && File.Exists(Path.Combine(app, "notes-of-mine.txt")));
+
+            // A swap that fails half way puts everything back.
+            string app2 = Path.Combine(scratch, "app2");
+            Directory.CreateDirectory(app2);
+            File.WriteAllBytes(Path.Combine(app2, "SecHUD.exe"), FakeProgram("old program"));
+            File.WriteAllText(Path.Combine(app2, "README.md"), "old readme");
+            Directory.CreateDirectory(Path.Combine(app2, "LICENSE")); // something in the way
+            string staged2 = Path.Combine(scratch, "staged2");
+            Directory.CreateDirectory(staged2);
+            File.WriteAllBytes(Path.Combine(staged2, "SecHUD.exe"), newExe);
+            File.WriteAllText(Path.Combine(staged2, "README.md"), "new readme");
+            File.WriteAllText(Path.Combine(staged2, "LICENSE"), "new licence");
+            bool failed = !Updater.Install(staged2, app2, out error);
+            Check("if the swap fails part way, every file is put back as it was", failed && error.Length > 0 && File.ReadAllText(Path.Combine(app2, "README.md")) == "old readme" && File.ReadAllBytes(Path.Combine(app2, "SecHUD.exe")).SequenceEqual(FakeProgram("old program")) && !File.Exists(Path.Combine(app2, "README.md.old")));
+            Check("an update with no program in it is never installed", !Updater.Install(Path.Combine(scratch, "u2"), app2, out error));
+
+            // The button, start to finish.
+            Updater.AppDirOverride = app;
+            File.WriteAllBytes(Path.Combine(app, "SecHUD.exe"), FakeProgram("old program"));
+            servedHash = Updater.Sha256File(zip) + "  SecHUD-v0.9.0.zip";
+            Updater.Downloader = (url, path, max, progress) =>
+            {
+                if (url.EndsWith(".zip")) File.Copy(served, path, true); else File.WriteAllText(path, servedHash);
+                return "";
+            };
+
+            var vm = new MainViewModel();
+            string opened = null, restartPath = null, shown = null, askedQuestion = null;
+            vm.PageOpener = url => opened = url;
+            vm.ShowMessage = text => shown = text;
+            good.Url = "https://github.com/sivadyt/SecHUD/releases/tag/v0.9.0"; good.Notes = "New things.";
+            vm.ApplyUpdate(good);
+            Check("the button says it will update by itself", vm.UpdateLabel == "UPDATE AVAILABLE: V0.9.0" && vm.UpdateNotes.Contains("closes, updates and opens again by itself"));
+
+            vm.OpenUpdateCommand.Execute(null);
+            Check("with no window attached the button opens the download page, as before", opened == good.Url && restartPath == null);
+
+            vm.RestartRequested += path => restartPath = path;
+            vm.Ask = question => { askedQuestion = question; return false; };
+            opened = null;
+            vm.OpenUpdateCommand.Execute(null);
+            Check("answering no leaves everything alone", askedQuestion != null && askedQuestion.Contains("version 0.9.0") && !vm.UpdateBusy && restartPath == null && opened == null && File.ReadAllBytes(Path.Combine(app, "SecHUD.exe")).SequenceEqual(FakeProgram("old program")));
+
+            vm.Ask = question => true;
+            vm.OpenUpdateCommand.Execute(null);
+            for (int i = 0; i < 100 && restartPath == null; i++) Thread.Sleep(50);
+            Check("answering yes downloads, installs and asks for the restart", restartPath == Path.Combine(app, "SecHUD.exe") && vm.UpdateLabel == "RESTARTING..." && vm.UpdateBusy && shown == null && File.ReadAllBytes(Path.Combine(app, "SecHUD.exe")).SequenceEqual(newExe));
+            vm.OpenUpdateCommand.Execute(null);
+            vm.ApplyUpdate(null);
+            Check("the button cannot be pressed twice while it is working", vm.UpdateAvailable && vm.UpdateLabel == "RESTARTING...");
+
+            // And when the download is bad: nothing changes, the reason is shown, the page opens.
+            File.WriteAllBytes(Path.Combine(app, "SecHUD.exe"), FakeProgram("old program"));
+            servedHash = new string('0', 64);
+            var vm2 = new MainViewModel();
+            string restart2 = null, shown2 = null, opened2 = null;
+            vm2.PageOpener = url => opened2 = url;
+            vm2.ShowMessage = text => shown2 = text;
+            vm2.RestartRequested += path => restart2 = path;
+            vm2.Ask = question => true;
+            vm2.ApplyUpdate(good);
+            vm2.OpenUpdateCommand.Execute(null);
+            for (int i = 0; i < 100 && opened2 == null; i++) Thread.Sleep(50);
+            Check("a bad download changes nothing, says why, and opens the page instead", restart2 == null && opened2 == good.Url && shown2 != null && shown2.Contains("does not match") && shown2.Contains("Nothing was changed") && !vm2.UpdateBusy
+                && vm2.UpdateLabel == "UPDATE AVAILABLE: V0.9.0" && File.ReadAllBytes(Path.Combine(app, "SecHUD.exe")).SequenceEqual(FakeProgram("old program")));
+        }
+        finally
+        {
+            Updater.VersionReader = realReader;
+            Updater.Downloader = realDownloader;
+            Updater.AppDirOverride = null;
+        }
     }
 }
 

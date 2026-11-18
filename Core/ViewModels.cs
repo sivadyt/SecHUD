@@ -393,6 +393,8 @@ namespace SecHUD
         private string updateNotes = "";
         private string updateUrl = Updater.ReleasesPage;
         private string announcedVersion = "";
+        private UpdateInfo pendingUpdate;
+        private bool updateBusy;
         private bool setCheckUpdates = true;
         private string syslogStatus = "SYSLOG INTAKE IS OFF. TURN IT ON IN SETTINGS.";
         private string eventFilter = "";
@@ -448,7 +450,7 @@ namespace SecHUD
             SaveSettingsCommand = new RelayCommand(o => SaveSettings());
             TestDiscordCommand = new RelayCommand(o => TestDiscord());
             OpenRulesCommand = new RelayCommand(o => OpenRules());
-            OpenUpdateCommand = new RelayCommand(o => Launch(updateUrl, ""));
+            OpenUpdateCommand = new RelayCommand(o => BeginUpdate());
             CheckUpdatesCommand = new RelayCommand(o => { var ignored = CheckForUpdateAsync(true); });
             FinishWelcomeCommand = new RelayCommand(o => FinishWelcome());
 
@@ -485,6 +487,18 @@ namespace SecHUD
 
         /// <summary>Raised once per new version, with a short message for the tray.</summary>
         public event Action<string> UpdateFound;
+
+        /// <summary>
+        /// Raised when a new version has been put in place: the window starts the program at this
+        /// path and closes this copy. While nobody listens, the update button opens the download page.
+        /// </summary>
+        public event Action<string> RestartRequested;
+
+        /// <summary>Set by the window: a friendly yes/no question, with Yes as the default.</summary>
+        public Func<string, bool> Ask { get; set; }
+
+        /// <summary>True while an update is being downloaded or installed.</summary>
+        public bool UpdateBusy { get { return updateBusy; } private set { Set(ref updateBusy, value); } }
 
         public bool UpdateAvailable { get { return updateAvailable; } private set { Set(ref updateAvailable, value); } }
         public string UpdateLabel { get { return updateLabel; } private set { Set(ref updateLabel, value); } }
@@ -643,10 +657,10 @@ namespace SecHUD
         /// <summary>Looks for a newer release shortly after start, then once a day.</summary>
         private async Task UpdateLoopAsync()
         {
-            await Task.Delay(TimeSpan.FromSeconds(20));
+            await Task.Delay(TimeSpan.FromSeconds(Updater.OfferAnyRelease ? 2 : 20));
             while (true)
             {
-                if (config.CheckUpdates) await CheckForUpdateAsync(false);
+                if (config.CheckUpdates || Updater.OfferAnyRelease) await CheckForUpdateAsync(false);
                 await Task.Delay(TimeSpan.FromHours(24));
             }
         }
@@ -678,22 +692,110 @@ namespace SecHUD
         /// <summary>Shows (or hides) the update button. Announces each new version once.</summary>
         public void ApplyUpdate(UpdateInfo info)
         {
+            if (updateBusy) return; // an install is in progress: leave its button alone
             if (info == null)
             {
+                pendingUpdate = null;
                 UpdateAvailable = false;
                 return;
             }
+            pendingUpdate = info;
             updateUrl = info.Url;
             UpdateLabel = "UPDATE AVAILABLE: V" + info.Version;
-            UpdateNotes = "What is new in " + info.Version + ":\n\n" + info.Notes + "\n\nClick to open the download page.";
+            UpdateNotes = "What is new in " + info.Version + ":\n\n" + info.Notes + "\n\n"
+                + (info.CanInstall ? "Click to update. SecHUD closes, updates and opens again by itself." : "Click to open the download page.");
             UpdateAvailable = true;
 
             if (announcedVersion != info.Version)
             {
                 announcedVersion = info.Version;
                 Action<string> handler = UpdateFound;
-                if (handler != null) handler("SecHUD " + info.Version + " is available. Open SecHUD and click the update button to get it.");
+                if (handler != null) handler("SecHUD " + info.Version + " is available. Open SecHUD and click the yellow update button at the top.");
             }
+        }
+
+        /// <summary>
+        /// The update button. Asks once, then downloads the release, checks it against its
+        /// published checksum, swaps the program files and asks the window to restart. If any
+        /// step fails nothing is changed, the reason is shown, and the download page opens so
+        /// the update can still be done by hand.
+        /// </summary>
+        public async void BeginUpdate()
+        {
+            if (updateBusy) return;
+            UpdateInfo info = pendingUpdate;
+            Action<string> restart = RestartRequested;
+            if (info == null || !info.CanInstall || restart == null)
+            {
+                OpenDownloadPage();
+                return;
+            }
+
+            string question = "Update SecHUD to version " + info.Version + " now?\n\n"
+                + "SecHUD will download it, close, and open again by itself. It takes a few seconds, "
+                + "and your settings and device list are kept.";
+            Func<string, bool> ask = Ask ?? Confirm;
+            if (ask == null || !ask(question)) return;
+
+            UpdateBusy = true;
+            string label = UpdateLabel;
+            UpdateLabel = "DOWNLOADING UPDATE...";
+            try
+            {
+                string appDir = Updater.AppDir;
+                string error = "";
+                bool installed = await Task.Run(() =>
+                {
+                    string staged;
+                    if (!Updater.Prepare(info, ShowUpdateProgress, out staged, out error)) return false;
+                    ShowUpdateProgress("INSTALLING...");
+                    return Updater.Install(staged, appDir, out error);
+                });
+
+                if (!installed)
+                {
+                    Store.LogError("update", new Exception(error));
+                    UpdateLabel = label;
+                    UpdateBusy = false;
+                    if (ShowMessage != null)
+                        ShowMessage("SecHUD could not update itself:\n\n" + error + "\n\nNothing was changed. The download page will open so you can get the new version from there.");
+                    OpenDownloadPage();
+                    return;
+                }
+
+                UpdateLabel = "RESTARTING...";
+                restart(System.IO.Path.Combine(appDir, Updater.ExeName));
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("update", ex);
+                UpdateLabel = label;
+                UpdateBusy = false;
+                if (ShowMessage != null) ShowMessage("SecHUD could not update itself:\n\n" + ex.Message);
+            }
+        }
+
+        /// <summary>Replaceable so tests can see the page that would open without opening a browser.</summary>
+        public Action<string> PageOpener;
+
+        private void OpenDownloadPage()
+        {
+            if (PageOpener != null) PageOpener(updateUrl);
+            else Launch(updateUrl, "");
+        }
+
+        /// <summary>Called from the download thread: shows progress on the update button.</summary>
+        private void ShowUpdateProgress(string text)
+        {
+            SynchronizationContext context = uiContext;
+            if (context == null) UpdateLabel = text;
+            else context.Post(o => UpdateLabel = text, null);
+        }
+
+        /// <summary>Shown in the footer right after an update has restarted the program.</summary>
+        public void AnnounceUpdated()
+        {
+            FooterNote = "UPDATED TO VERSION " + Updater.CurrentVersion.ToString(3);
         }
 
         private async Task RunLoopAsync()

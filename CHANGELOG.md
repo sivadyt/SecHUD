@@ -3,6 +3,19 @@
 The newest version is at the top. The text under each version is what people see in the app
 when an update is available.
 
+## 0.8.1
+
+- **One-click updates.** From this version on, updating is one button. When a new version is
+  out, click the yellow UPDATE AVAILABLE button at the top and answer Yes. SecHUD downloads it,
+  closes, and opens again by itself.
+
+**Updating to this version is the last time you do it by hand:**
+
+1. On this page, under Assets, click `SecHUD-v0.8.1.zip` to download it.
+2. Close SecHUD: right-click its icon near the clock and choose Exit.
+3. Open the zip and drag everything in it into your SecHUD folder. Say yes to replacing the files.
+4. Start SecHUD again.
+
 ## 0.8.0
 
 - **Live watch.** SecHUD no longer waits for the next scan to notice a change on this PC. Windows

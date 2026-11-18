@@ -34,12 +34,27 @@ program folder and that data folder.
 
 ## Updates
 
-About once a day SecHUD asks GitHub whether a newer release exists. If there is one, an
-UPDATE AVAILABLE button appears at the top with what changed. It opens the download page: unzip
-the new version over the old one and start it again. Your settings and baselines are kept.
+About once a day SecHUD asks GitHub whether a newer release exists. If there is one, a yellow
+UPDATE AVAILABLE button appears at the top. Click it, answer Yes, and SecHUD downloads the new
+version, closes, and opens again by itself a few seconds later. Your settings and baselines are
+kept. There is nothing to unzip and nothing to find.
 
-The check sends nothing about you or your network, never installs anything by itself, and can
-be switched off in Settings.
+How it stays safe:
+
+- Nothing is downloaded or installed until you click the button and say yes.
+- The download only ever comes from this project's releases on github.com, over HTTPS.
+- It is only used if its SHA-256 matches the checksum published with the release, and the
+  program inside is exactly the version the release says it is.
+- Only the program's own files are replaced. The old ones are set aside first, so if anything
+  goes wrong part way they are put straight back.
+- If the update cannot be installed for any reason (no internet, a folder SecHUD may not write
+  to), it says why and opens the download page instead.
+
+The check itself sends nothing about you or your network and can be switched off in Settings.
+
+Versions 0.7.0 and 0.8.0 do not have this yet. Their button opens the download page: download
+the zip, unzip it over the old files, and start SecHUD again. That is the last update that
+has to be done by hand.
 
 ## What it watches
 
@@ -152,6 +167,10 @@ Closing the window hides it to the system tray so it keeps watching. Exit is in 
 `tests\live-test.cmd` does two harmless things an attacker would do, waits while you watch SecHUD
 catch them within seconds, then undoes both: a new startup entry (T1547.001) and, when run as
 administrator, a new disabled local account (T1136.001).
+
+`tests\update-test.cmd` tries the update button for real. It copies your build to a temporary
+folder and starts it with `--test-update`, which offers the latest release whatever version the
+copy is. Click the button and watch it download, close and reopen.
 
 `run-tests.cmd` builds and runs the automated tests. They cover the detection rules, baselines,
 parsers and the window's logic using fake inputs and a temporary folder, so they never touch
@@ -274,7 +293,7 @@ leaves your network. Exported reports leave out your public address.
 | `Core/Wifi.cs`, `Core/Upnp.cs` | Wi-Fi access points and router port forwards |
 | `Core/Vendors.cs`, `Data/oui.gz` | Device makers by MAC address (the public IEEE registry) |
 | `Core/Quiet.cs` | Quiet hours for Discord |
-| `Core/Updater.cs` | The check for a newer release |
+| `Core/Updater.cs` | The check for a newer release, and the one-click update |
 | `Core/History.cs`, `Core/Report.cs` | History file, charts data and HTML export |
 | `Core/Store.cs`, `Core/Secrets.cs`, `Core/Models.cs` | Storage, DPAPI secrets, data types |
 | `Core/Native.cs` | The few Windows API calls .NET has no wrapper for |

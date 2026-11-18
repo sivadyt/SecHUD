@@ -568,7 +568,7 @@
                                     <Button Style="{StaticResource SmallButton}" Content="CHECK NOW" Command="{Binding CheckUpdatesCommand}"/>
                                     <TextBlock Text="{Binding VersionText}" Style="{StaticResource StatusLine}" VerticalAlignment="Center" Margin="14,0,0,0"/>
                                 </StackPanel>
-                                <TextBlock Style="{StaticResource HintText}" Text="The check only asks GitHub for the latest version number. It sends nothing about you or your network, and it never installs anything by itself."/>
+                                <TextBlock Style="{StaticResource HintText}" Text="The check only asks GitHub for the latest version number and sends nothing about you or your network. When a new version is out, a yellow button appears at the top. Click it and SecHUD downloads the update, checks it, and restarts by itself. Nothing is installed until you click."/>
 
                                 <Rectangle Height="1" Fill="{StaticResource AccentDimBrush}" Margin="0,14,0,14"/>
                                 <TextBlock Text="WATCHED HOSTS" Style="{StaticResource SectionTitle}"/>
