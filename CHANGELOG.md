@@ -3,6 +3,16 @@
 The newest version is at the top. The text under each version is what people see in the app
 when an update is available.
 
+## 0.8.2
+
+- **An installer.** New here? Under Assets below, download `SecHUD-Setup.exe` and run it. A small
+  window downloads SecHUD, installs it, adds Start menu and desktop shortcuts, and starts it.
+  There is nothing to unzip. Windows may show a blue "Windows protected your PC" box the first
+  time: choose More info, then Run anyway.
+- Already have SecHUD? Just press the yellow update button, or run the installer over it. Your
+  settings are kept either way.
+- SecHUD can now be removed from Installed apps in Windows Settings, like any other program.
+
 ## 0.8.1
 
 - **One-click updates.** From this version on, updating is one button. When a new version is

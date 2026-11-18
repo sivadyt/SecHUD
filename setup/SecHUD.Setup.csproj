@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- SecHUD-Setup.exe: the one file people download. It fetches the newest release and installs it.
+       Same rules as the app: .NET Framework 4.8, no NuGet packages. It shares the app's own
+       update code (download, checksum, unpack, file swap) so there is one implementation to trust. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <LangVersion>7.3</LangVersion>
+    <RootNamespace>SecHUD.Setup</RootNamespace>
+    <AssemblyName>SecHUD-Setup</AssemblyName>
+    <Version>1.0.0</Version>
+    <Authors>Ty</Authors>
+    <Product>SecHUD Setup</Product>
+    <Description>Installs SecHUD</Description>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\SecHUD.ico</ApplicationIcon>
+    <StartupObject>SecHUD.Setup.Program</StartupObject>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Core\Updater.cs" Link="Core\Updater.cs" />
+    <Compile Include="..\Core\Store.cs" Link="Core\Store.cs" />
+    <Compile Include="..\Core\Models.cs" Link="Core\Models.cs" />
+    <Compile Include="..\Core\Quiet.cs" Link="Core\Quiet.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+</Project>

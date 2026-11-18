@@ -21,16 +21,24 @@ Use it only on a network you own or have permission to monitor.
 
 ## Install
 
-1. Download the newest `SecHUD-v*.zip` from the [Releases page](https://github.com/sivadyt/SecHUD/releases/latest).
-2. Unzip it anywhere and run `SecHUD.exe`. There is no installer.
+1. Download [SecHUD-Setup.exe](https://github.com/sivadyt/SecHUD/releases/latest/download/SecHUD-Setup.exe).
+2. Run it and press Install.
+
+That is all. A small window downloads the newest version, installs it for you, adds Start menu
+and desktop shortcuts, and starts it. There is nothing to unzip and no administrator password
+is needed. Running the installer again later updates or repairs an existing copy and keeps
+your settings.
 
 Windows may show "Windows protected your PC" the first time, because the program is not signed
 with a paid certificate. Choose More info, then Run anyway. If you would rather not trust a
 downloaded exe, build it yourself from this source (see Build and run).
 
-It needs Windows 10 or 11. Everything it stores stays on your PC under `%LOCALAPPDATA%\SecHUD`.
-To remove it, turn off Start with Windows in Settings, exit from the tray, then delete the
-program folder and that data folder.
+It needs Windows 10 or 11. The program goes in `%LOCALAPPDATA%\Programs\SecHUD`, and everything
+it stores stays on your PC under `%LOCALAPPDATA%\SecHUD`. To remove it, open Installed apps in
+Windows Settings, find SecHUD and choose Uninstall. You are asked whether to keep your settings.
+
+Prefer to do it by hand? The [Releases page](https://github.com/sivadyt/SecHUD/releases/latest)
+also has `SecHUD-v*.zip`: unzip it anywhere and run `SecHUD.exe`.
 
 ## Updates
 
@@ -53,8 +61,8 @@ How it stays safe:
 The check itself sends nothing about you or your network and can be switched off in Settings.
 
 Versions 0.7.0 and 0.8.0 do not have this yet. Their button opens the download page: download
-the zip, unzip it over the old files, and start SecHUD again. That is the last update that
-has to be done by hand.
+`SecHUD-Setup.exe` from it and run it. It closes the old copy, installs the new one and starts
+it, and from then on updates are one click.
 
 ## What it watches
 
@@ -157,8 +165,9 @@ are re-read on every scan, so there is nothing to rebuild.
 
 ## Build and run
 
-Double-click `build.cmd`, or run `dotnet build -c Release` and start `bin\Release\SecHUD.exe`.
-You can also open `SecHUD.csproj` in Visual Studio and press F5.
+Double-click `build.cmd`, or run `dotnet build SecHUD.csproj -c Release` and start
+`bin\Release\SecHUD.exe`. You can also open `SecHUD.csproj` in Visual Studio and press F5.
+`build-setup.cmd` builds the installer into `setup\bin\Release\SecHUD-Setup.exe`.
 
 Closing the window hides it to the system tray so it keeps watching. Exit is in the tray menu.
 
@@ -185,8 +194,8 @@ the result). Publishing is a separate step, so nothing reaches other people by a
    That section becomes the release text people see in the app.
 2. On GitHub open Actions, pick "Build and release", and press Run workflow.
 
-GitHub builds the exe, runs the tests, zips it, and publishes the release with the tag
-`v<version>`. Installed copies compare that tag with their own version, so everyone on an older
+GitHub builds the exe and the installer, runs the tests, does a real install and uninstall on
+its own machine, and publishes the release with the tag `v<version>`. Installed copies compare that tag with their own version, so everyone on an older
 one sees UPDATE AVAILABLE within a day. Pushing a tag such as `v0.8.0` does the same thing.
 
 `release.cmd` still makes the same zip on your own PC, for trying a build before publishing it.
@@ -300,5 +309,6 @@ leaves your network. Exported reports leave out your public address.
 | `Core/ViewModels.cs` | What the window binds to, and the scan loop |
 | `MainWindow.xaml`, `App.xaml` | The window and its theme |
 | `tests/` | Automated tests and the live test script |
+| `setup/` | SecHUD-Setup.exe: the installer and uninstaller |
 | `release.cmd`, `tools/` | Builds the zip on your own PC |
 | `.github/workflows/release.yml`, `CHANGELOG.md` | Builds, tests and publishes releases on GitHub |

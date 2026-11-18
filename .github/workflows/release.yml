@@ -49,6 +49,58 @@ jobs:
           & tests\bin\Release\SecHUD.Tests.exe
           if ($LASTEXITCODE -ne 0) { throw 'A test failed.' }
 
+      - name: Build the installer
+        run: dotnet build setup\SecHUD.Setup.csproj -c Release -nologo
+
+      # A real install and uninstall on this machine, using the newest published release.
+      - name: Try the installer
+        shell: pwsh
+        run: |
+          $setup = (Resolve-Path 'setup\bin\Release\SecHUD-Setup.exe').Path
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\SecHUD'
+          $log = Join-Path $env:LOCALAPPDATA 'SecHUD\error.log'
+          $startMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'SecHUD.lnk'
+          $desktop = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'SecHUD.lnk'
+          $regKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SecHUD'
+
+          # The window opens and stays open (a mistake in its layout would close it at once).
+          foreach ($mode in @(@(), @('--uninstall'))) {
+            $window = if ($mode.Count) { Start-Process $setup -ArgumentList $mode -PassThru } else { Start-Process $setup -PassThru }
+            Start-Sleep -Seconds 6
+            if ($window.HasExited) { throw "The setup window closed by itself (mode: $mode)." }
+            $window.Refresh()
+            Write-Host "Window open: '$($window.MainWindowTitle)'"
+            $window | Stop-Process -Force
+          }
+
+          $install = Start-Process $setup -ArgumentList '--silent', '--no-launch' -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            $why = if (Test-Path $log) { Get-Content $log -Raw } else { 'no log was written' }
+            if ($why -match 'GitHub answered (403|429)') {
+              # GitHub limits anonymous requests from shared build machines. Not a fault in the installer.
+              Write-Host "::warning::Installer check skipped: GitHub rate-limited this build machine."
+              exit 0
+            }
+            Write-Host $why
+            throw 'The silent install failed.'
+          }
+          foreach ($path in @("$dir\SecHUD.exe", "$dir\Uninstall.exe", $startMenu, $desktop)) {
+            if (-not (Test-Path $path)) { throw "Missing after install: $path" }
+          }
+          $entry = Get-ItemProperty $regKey
+          $installed = (Get-Item "$dir\SecHUD.exe").VersionInfo.FileVersion
+          Write-Host "Installed SecHUD $installed to $dir (registered as $($entry.DisplayName) $($entry.DisplayVersion))"
+          if ($entry.InstallLocation -ne $dir) { throw 'The Installed apps entry points at the wrong folder.' }
+
+          # Uninstall.exe steps out to the temp folder first, so wait for the folder to go.
+          Start-Process "$dir\Uninstall.exe" -ArgumentList '--uninstall', '--silent' -Wait | Out-Null
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path $dir) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          foreach ($path in @($dir, $startMenu, $desktop, $regKey)) {
+            if (Test-Path $path) { throw "Still there after uninstall: $path" }
+          }
+          Write-Host 'Install and uninstall both worked.'
+
       - name: Pack the zip
         id: pack
         shell: pwsh
@@ -87,6 +139,7 @@ jobs:
           path: |
             release/*.zip
             release/*.sha256.txt
+            setup/bin/Release/SecHUD-Setup.exe
           retention-days: 14
 
       - name: Publish the release
@@ -101,6 +154,6 @@ jobs:
           }
           gh release view "v$version" *> $null
           if ($LASTEXITCODE -eq 0) { throw "Release v$version already exists. Raise <Version> in SecHUD.csproj first." }
-          gh release create "v$version" "release\SecHUD-v$version.zip" "release\SecHUD-v$version.sha256.txt" `
+          gh release create "v$version" "setup\bin\Release\SecHUD-Setup.exe" "release\SecHUD-v$version.zip" "release\SecHUD-v$version.sha256.txt" `
             --title "SecHUD $version" --notes-file release\notes.md --target $env:GITHUB_SHA
           if ($LASTEXITCODE -ne 0) { throw 'The release could not be created.' }

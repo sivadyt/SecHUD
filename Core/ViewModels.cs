@@ -605,6 +605,10 @@ namespace SecHUD
             RefreshEvents();
             RefreshHistory(DateTime.Now);
 
+            // "Start with Windows" always points at this copy, wherever it was installed or moved to,
+            // so the autorun watch must never flag the program's own entry.
+            try { if (StartupEntry.IsEnabled()) TrustOwnStartupEntry(); } catch { }
+
             if (firstRun)
             {
                 Level = "WELCOME";

@@ -8,7 +8,7 @@
     <LangVersion>7.3</LangVersion>
     <RootNamespace>SecHUD</RootNamespace>
     <AssemblyName>SecHUD</AssemblyName>
-    <Version>0.8.1</Version>
+    <Version>0.8.2</Version>
     <Authors>Ty</Authors>
     <Product>SecHUD</Product>
     <Description>Home network security monitor</Description>
@@ -25,6 +25,10 @@
     <!-- The tests are their own project (tests\SecHUD.Tests.csproj). -->
     <Compile Remove="tests\**" />
     <None Remove="tests\**" />
+    <!-- So is the installer (setup\SecHUD.Setup.csproj). -->
+    <Compile Remove="setup\**" />
+    <Page Remove="setup\**" />
+    <None Remove="setup\**" />
   </ItemGroup>
 
   <ItemGroup>

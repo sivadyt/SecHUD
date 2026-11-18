@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using SecHUD;
+using SecHUD.Setup;
 
 /// <summary>
 /// SecHUD's tests. Run them with run-tests.cmd. Everything here works on a temporary data
@@ -66,6 +67,7 @@ static partial class Tests
             LiveWatchHelpers();
             LiveAndQuietInTheWindow();
             UpdateInstall();
+            SetupProgram();
             PlatformTests();
         }
         catch (Exception ex)
@@ -1011,6 +1013,131 @@ static partial class Tests
             Updater.VersionReader = realReader;
             Updater.Downloader = realDownloader;
             Updater.AppDirOverride = null;
+        }
+    }
+}
+
+/// <summary>Records what setup would do to Windows, without doing it.</summary>
+class FakeSetupSystem : ISetupSystem
+{
+    public List<string> Calls = new List<string>();
+    public string Installed = "";
+    public void StopRunningApp() { Calls.Add("stop"); }
+    public void MakeShortcut(string linkPath, string targetExe, string workingDir) { Calls.Add("shortcut " + linkPath + " -> " + targetExe); }
+    public void RemoveShortcut(string linkPath) { Calls.Add("unshortcut " + linkPath); }
+    public void RegisterUninstall(string installDir, string version) { Calls.Add("register " + version + " " + installDir); Installed = installDir; }
+    public void UnregisterUninstall() { Calls.Add("unregister"); Installed = ""; }
+    public void FixStartupEntry(string exePath) { Calls.Add("startup " + exePath); }
+    public void RemoveStartupEntry() { Calls.Add("unstartup"); }
+    public void Launch(string exePath) { Calls.Add("launch " + exePath); }
+    public string InstalledDir() { return Installed; }
+}
+
+static partial class Tests
+{
+    static void SetupProgram()
+    {
+        SetupOptions parsed = Installer.ParseArgs(new[] { "--UNINSTALL", "--silent", "--dir", "\"C:\\Some Folder\\SecHUD\"", "--remove-data", "--no-launch", "--no-desktop", "--nonsense" });
+        SetupOptions plain = Installer.ParseArgs(null);
+        Check("setup reads its options, and with none it simply installs", parsed.Uninstall && parsed.Silent && parsed.RemoveData && parsed.NoLaunch && parsed.NoDesktopShortcut && parsed.Dir == "C:\\Some Folder\\SecHUD"
+            && !plain.Uninstall && !plain.Silent && !plain.NoLaunch && !plain.NoDesktopShortcut && plain.Dir == "" && Installer.ParseArgs(new[] { "--dir" }).Dir == "");
+
+        string scratch = Path.Combine(Store.Dir, "setup-test");
+        if (Directory.Exists(scratch)) Directory.Delete(scratch, true);
+        Directory.CreateDirectory(scratch);
+        byte[] program = FakeProgram("installed program");
+        string zip = MakeZip(Path.Combine(scratch, "release.zip"), "SecHUD.exe", program, "README.md", Encoding.UTF8.GetBytes("readme"), "LICENSE", Encoding.UTF8.GetBytes("licence"));
+        string self = Path.Combine(scratch, "SecHUD-Setup.exe");
+        File.WriteAllBytes(self, FakeProgram("setup program"));
+        string dir = Path.Combine(scratch, "Programs", "SecHUD");
+        string exe = Path.Combine(dir, "SecHUD.exe");
+        const string baseUrl = "https://github.com/sivadyt/SecHUD/releases/download/v0.9.0/";
+
+        ISetupSystem realSystem = Installer.Windows;
+        Func<UpdateInfo> realFinder = Installer.ReleaseFinder;
+        Func<string, string> realReader = Updater.VersionReader;
+        Func<string, string, long, Action<int>, string> realDownloader = Updater.Downloader;
+        string realData = Store.Dir;
+        try
+        {
+            var system = new FakeSetupSystem();
+            Installer.Windows = system;
+            Updater.VersionReader = path => "0.9.0.0";
+            string servedHash = Updater.Sha256File(zip);
+            Updater.Downloader = (url, path, max, progress) =>
+            {
+                if (url.EndsWith(".zip")) { File.Copy(zip, path, true); if (progress != null) progress(50); } else File.WriteAllText(path, servedHash);
+                return "";
+            };
+            var release = new UpdateInfo { Version = "0.9.0", ZipUrl = baseUrl + "SecHUD-v0.9.0.zip", HashUrl = baseUrl + "SecHUD-v0.9.0.sha256.txt", Digest = Updater.Sha256File(zip) };
+            Installer.ReleaseFinder = () => release;
+
+            Check("setup installs for the current user unless told where", Installer.TargetDir(new SetupOptions()) == Installer.DefaultDir && Installer.DefaultDir.EndsWith(Path.Combine("Programs", "SecHUD"))
+                && Installer.TargetDir(new SetupOptions { Dir = dir }) == Path.GetFullPath(dir));
+
+            var said = new List<string>();
+            string version, error;
+            bool installed = Installer.Install(new SetupOptions { Dir = dir }, self, said.Add, out version, out error);
+            Check("setup downloads the newest release and puts the program in place", installed && version == "0.9.0" && File.ReadAllBytes(exe).SequenceEqual(program) && File.Exists(Path.Combine(dir, "README.md")) && File.Exists(Path.Combine(dir, "LICENSE")) && !File.Exists(exe + ".old"));
+            Check("it leaves a copy of itself behind as the uninstaller", File.ReadAllBytes(Path.Combine(dir, "Uninstall.exe")).SequenceEqual(FakeProgram("setup program")));
+            Check("it adds Start menu and desktop shortcuts, registers with Windows, and starts SecHUD",
+                system.Calls.SequenceEqual(new[] { "stop", "shortcut " + Installer.StartMenuShortcut + " -> " + exe, "shortcut " + Installer.DesktopShortcut + " -> " + exe, "register 0.9.0 " + Path.GetFullPath(dir), "startup " + exe, "launch " + exe }));
+            Check("progress is worded for an install, not an update", said.Contains("LOOKING FOR THE NEWEST VERSION...") && said.Contains("DOWNLOADING SECHUD 50%") && said.Contains("INSTALLING...") && said.Contains("STARTING SECHUD...") && !said.Any(x => x.Contains("UPDATE")));
+
+            // Running it again over an existing install is how an old copy is updated or repaired.
+            File.WriteAllBytes(exe, FakeProgram("older program"));
+            File.WriteAllText(Path.Combine(dir, "my-notes.txt"), "mine");
+            system.Calls.Clear();
+            bool again = Installer.Install(new SetupOptions { Dir = dir, NoDesktopShortcut = true, NoLaunch = true }, self, null, out version, out error);
+            Check("running setup again updates the program and keeps anything else in the folder", again && File.ReadAllBytes(exe).SequenceEqual(program) && File.ReadAllText(Path.Combine(dir, "my-notes.txt")) == "mine" && !File.Exists(exe + ".old"));
+            Check("the desktop shortcut and the launch can be switched off", system.Calls.Count(c => c.StartsWith("shortcut")) == 1 && !system.Calls.Any(c => c.StartsWith("launch")));
+
+            // Failures leave the existing install alone, and a running SecHUD is not even stopped.
+            File.WriteAllBytes(exe, FakeProgram("older program"));
+            system.Calls.Clear();
+            servedHash = new string('0', 64);
+            bool badDownload = !Installer.Install(new SetupOptions { Dir = dir }, self, null, out version, out error);
+            string badError = error;
+            Installer.ReleaseFinder = () => { Installer.FindError = "could not reach GitHub"; return null; };
+            bool offline = !Installer.Install(new SetupOptions { Dir = dir }, self, null, out version, out error);
+            string offlineError = error;
+            Installer.ReleaseFinder = () => null;
+            bool nothingPublished = !Installer.Install(new SetupOptions { Dir = dir }, self, null, out version, out error);
+            Installer.ReleaseFinder = () => new UpdateInfo { Version = "0.9.0", ZipUrl = baseUrl + "SecHUD-v0.9.0.zip" };
+            bool unchecked_ = !Installer.Install(new SetupOptions { Dir = dir }, self, null, out version, out error);
+            Check("a failed install changes nothing and does not stop a running SecHUD", badDownload && badError.Contains("does not match") && offline && offlineError == "could not reach GitHub" && nothingPublished && unchecked_ && error.Length > 0
+                && system.Calls.Count == 0 && File.ReadAllBytes(exe).SequenceEqual(FakeProgram("older program")));
+
+            // Removing it again.
+            Installer.ReleaseFinder = () => release;
+            servedHash = Updater.Sha256File(zip);
+            Installer.Install(new SetupOptions { Dir = dir, NoLaunch = true }, self, null, out version, out error);
+            File.WriteAllText(exe + ".old", "left over");
+            system.Calls.Clear();
+            string data = Path.Combine(scratch, "data");
+            Directory.CreateDirectory(data);
+            File.WriteAllText(Path.Combine(data, "config.json"), "{}");
+            Store.UseDirectory(data);
+
+            Check("the uninstaller finds where SecHUD was installed", Installer.TargetDir(new SetupOptions { Uninstall = true }) == Path.GetFullPath(dir));
+            bool removed = Installer.Uninstall(new SetupOptions { Uninstall = true }, null, out error);
+            Check("uninstall removes the program, its shortcuts, its startup entry and its Windows entry", removed && !File.Exists(exe) && !File.Exists(exe + ".old") && !File.Exists(Path.Combine(dir, "Uninstall.exe")) && !File.Exists(Path.Combine(dir, "README.md"))
+                && system.Calls.SequenceEqual(new[] { "stop", "unstartup", "unshortcut " + Installer.StartMenuShortcut, "unshortcut " + Installer.DesktopShortcut, "unregister" }));
+            Check("it only deletes its own files, and keeps your settings unless asked", File.ReadAllText(Path.Combine(dir, "my-notes.txt")) == "mine" && File.Exists(Path.Combine(data, "config.json")));
+
+            File.Delete(Path.Combine(dir, "my-notes.txt"));
+            Installer.Install(new SetupOptions { Dir = dir, NoLaunch = true }, self, null, out version, out error);
+            bool removedAll = Installer.Uninstall(new SetupOptions { Uninstall = true, Dir = dir, RemoveData = true }, null, out error);
+            Check("with nothing else in it the folder goes too, and settings go when asked", removedAll && !Directory.Exists(dir) && !Directory.Exists(data));
+            Check("uninstalling when it is not installed is not an error", Installer.Uninstall(new SetupOptions { Uninstall = true, Dir = dir }, null, out error));
+        }
+        finally
+        {
+            Store.UseDirectory(realData);
+            Installer.Windows = realSystem;
+            Installer.ReleaseFinder = realFinder;
+            Updater.VersionReader = realReader;
+            Updater.Downloader = realDownloader;
         }
     }
 }
