@@ -187,7 +187,8 @@
                                                 <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0">
                                                     <TextBlock Text="{Binding Flag}" Style="{StaticResource PortFlagText}" Margin="0,0,10,0"/>
                                                     <Button Style="{StaticResource HazardButton}" Content="APPROVE" Command="{Binding ApproveCommand}" ToolTip="This port is expected. Stop flagging it." Visibility="{Binding IsNew, Converter={StaticResource BoolToVis}}"/>
-                                                    <Button Style="{StaticResource HazardButton}" Content="IGNORE PROGRAM" Margin="8,0,0,0" Command="{Binding TrustCommand}" ToolTip="Stop flagging every port this program opens, now and later. For programs such as a media server or a game launcher that use different ports each time. You are asked first, and you can undo it in Settings." Visibility="{Binding CanTrust, Converter={StaticResource BoolToVis}}"/>
+                                                    <Button Style="{StaticResource HazardButton}" Content="IGNORE PROGRAM" Margin="8,0,0,0" Command="{Binding TrustCommand}" ToolTip="Stop flagging every port this program opens, now and later. For programs such as a media server or a game launcher that use different ports each time. You are asked first, and you can undo it in Settings." Visibility="{Binding CanTrustFlagged, Converter={StaticResource BoolToVis}}"/>
+                                                    <Button Style="{StaticResource QuietButton}" Content="IGNORE PROGRAM" Command="{Binding TrustCommand}" ToolTip="Never flag ports opened by this program. You are asked first, and you can undo it in Settings under Ignored programs." Visibility="{Binding CanTrustQuiet, Converter={StaticResource BoolToVis}}"/>
                                                 </StackPanel>
                                             </Grid>
                                         </Border>
@@ -604,6 +605,11 @@
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
+
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Button Style="{StaticResource SmallButton}" Content="ADD A PROGRAM..." Command="{Binding AddProgramCommand}" ToolTip="Browse to any program on this PC and ignore it, even if it is not running right now."/>
+                                    <TextBlock Text="FOR ONE THAT IS NOT IN THE LIST BELOW" Style="{StaticResource HeaderText}" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                </StackPanel>
 
                                 <TextBlock Text="PROGRAMS WITH A PORT OPEN RIGHT NOW" Style="{StaticResource HeaderText}" Margin="0,16,0,4"/>
                                 <TextBlock Text="NOTHING TO SHOW YET. WAIT FOR THE FIRST SCAN." Style="{StaticResource StatusLine}" Margin="0,0,0,6" Visibility="{Binding NoListeningPrograms, Converter={StaticResource BoolToVis}}"/>

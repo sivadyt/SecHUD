@@ -322,6 +322,12 @@
             <Setter Property="Padding" Value="10,3"/>
         </Style>
 
+        <!-- A button that is always there but should not shout, such as Ignore on an ordinary row -->
+        <Style x:Key="QuietButton" TargetType="Button" BasedOn="{StaticResource SmallButton}">
+            <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource MutedBrush}"/>
+        </Style>
+
         <!-- The Watch toggle on a device: muted when off, cyan while the device is being watched -->
         <Style x:Key="WatchButton" TargetType="Button" BasedOn="{StaticResource SmallButton}">
             <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>

@@ -94,7 +94,8 @@ Approving ports one by one never ends, so you can ignore the program instead:
 
 - In Settings, under Ignored programs, every program that has a port open right now is listed.
   Press Ignore next to it.
-- Or, when a port is flagged on the Ports tab, press Ignore program on that row.
+- Or on the Ports tab, press Ignore program on that program's row.
+- For a program that is not running right now, press Add a program in Settings and browse to it.
 
 You are asked first and shown who signed the program. From then on no port it opens is
 flagged. The rule matches the full path of the program file, so something that only borrows

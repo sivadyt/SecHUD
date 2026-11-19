@@ -219,7 +219,7 @@ namespace SecHUD
         public bool IsNew
         {
             get { return isNew; }
-            set { if (Set(ref isNew, value)) Raise("Flag"); }
+            set { if (Set(ref isNew, value)) Raise(string.Empty); } // everything on the row that depends on it is redrawn
         }
 
         public string Flag { get { return isNew ? "NEW" : ""; } }
@@ -242,7 +242,15 @@ namespace SecHUD
 
         /// <summary>The program's full path, when known. Ignoring a program needs it.</summary>
         public string ProgramPath { get; set; }
-        public bool CanTrust { get { return IsNew && !string.IsNullOrEmpty(ProgramPath); } }
+        /// <summary>True when this program is already on the ignored list.</summary>
+        public bool Ignored { get; set; }
+
+        /// <summary>Any program Windows can name, and that is not ignored yet, can be ignored from its row.</summary>
+        public bool CanTrust { get { return !Ignored && !string.IsNullOrEmpty(ProgramPath); } }
+        /// <summary>The yellow button on a flagged row.</summary>
+        public bool CanTrustFlagged { get { return CanTrust && IsNew; } }
+        /// <summary>The quiet button on every other row.</summary>
+        public bool CanTrustQuiet { get { return CanTrust && !IsNew; } }
 
         /// <summary>For a new port: what is known about the program behind it.</summary>
         public string Note { get; set; }
@@ -509,6 +517,7 @@ namespace SecHUD
             CheckUpdatesCommand = new RelayCommand(o => { var ignored = CheckForUpdateAsync(true); });
             FinishWelcomeCommand = new RelayCommand(o => FinishWelcome());
             SendSummaryCommand = new RelayCommand(o => SendSummaryNow());
+            AddProgramCommand = new RelayCommand(o => AddIgnoredProgram());
 
             syslog.Received += OnSyslogReceived;
             live.Changed += OnLiveChanged;
@@ -538,6 +547,7 @@ namespace SecHUD
 
         public ICommand FinishWelcomeCommand { get; private set; }
         public ICommand SendSummaryCommand { get; private set; }
+        public ICommand AddProgramCommand { get; private set; }
         public ICommand ScanCommand { get; private set; }
         public ICommand ApproveAllCommand { get; private set; }
         public ICommand OpenConfigCommand { get; private set; }
@@ -1117,21 +1127,7 @@ namespace SecHUD
             int unknown = Devices.Count(d => d.IsUnknown && !d.Guest);
             DeviceSummary = "DEVICES (" + Devices.Count + ")" + (unknown > 0 ? " " + unknown + " UNKNOWN" : "");
 
-            Ports.Clear();
-            foreach (PortInfo p in result.Ports.OrderByDescending(x => x.IsNew).ThenBy(x => x.Port))
-            {
-                Ports.Add(new PortViewModel(this)
-                {
-                    Port = p.Port, Process = (p.Process ?? "").ToUpperInvariant() + (p.Trusted ? "  (TRUSTED PROGRAM)" : ""), IsNew = p.IsNew,
-                    ProgramPath = p.Path ?? "",
-                    Note = p.Note == null ? "" : (p.Note.Text ?? "").ToUpperInvariant(),
-                    NoteText = p.Note == null ? "" : (p.Note.Text ?? ""),
-                    NoteLevel = p.Note == null ? "" : (p.Note.Level ?? "")
-                });
-            }
-            RefreshPrograms(result.Ports);
-            int freshPorts = result.Ports.Count(p => p.IsNew);
-            PortSummary = "PORTS (" + Ports.Count + ")" + (freshPorts > 0 ? " " + freshPorts + " NEW" : "");
+            RebuildPorts(result.Ports);
 
             // The autorun list can hold hundreds of rows, so it is only rebuilt when something in it changed.
             int freshAutoruns = result.Autoruns.Count(a => a.IsNew);
@@ -1624,6 +1620,23 @@ namespace SecHUD
             IgnoreProgram(port.ProgramPath, port.NoteText);
         }
 
+        /// <summary>Set by the window: lets the user browse to a program file. Returns null when they cancel.</summary>
+        public Func<string> PickProgram { get; set; }
+
+        /// <summary>Add a program (Settings): ignore one that is not running right now, by browsing to it.</summary>
+        private void AddIgnoredProgram()
+        {
+            if (PickProgram == null) return;
+            string path = PickProgram();
+            if (string.IsNullOrWhiteSpace(path)) return;
+            if (Scanner.IsTrustedProgram(config, path))
+            {
+                FooterNote = "ALREADY IGNORED: " + path.ToUpperInvariant();
+                return;
+            }
+            IgnoreProgram(path.Trim(), "");
+        }
+
         /// <summary>Adds a program to the ignored list, after asking.</summary>
         public async void IgnoreProgram(string path, string note)
         {
@@ -1663,8 +1676,7 @@ namespace SecHUD
                     Store.Save(Store.ConfigPath, updated);
                 });
                 config = Store.LoadConfig();
-                RefreshPrograms(lastResult == null ? new List<PortInfo>() : lastResult.Ports);
-                foreach (PortViewModel row in Ports.Where(r => ignore && string.Equals(r.ProgramPath, path, StringComparison.OrdinalIgnoreCase))) row.IsNew = false;
+                RebuildPorts(lastResult == null ? new List<PortInfo>() : lastResult.Ports);
                 FooterNote = ((ignore ? "IGNORING: " : "NO LONGER IGNORING: ") + path).ToUpperInvariant();
                 AddEvents(new List<EventEntry>
                 {
@@ -1678,6 +1690,35 @@ namespace SecHUD
                 Store.LogError("ignore program", ex);
                 if (ShowMessage != null) ShowMessage("Could not save that.\n\n" + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Redraws the Ports tab and the two lists in Settings from a scan's ports and the current
+        /// ignored list. Also called right after the ignored list changes, so the buttons follow at once.
+        /// </summary>
+        private void RebuildPorts(List<PortInfo> ports)
+        {
+            ports = ports ?? new List<PortInfo>();
+            Func<PortInfo, bool> ignored = p => Scanner.IsTrustedProgram(config, p.Path);
+            Func<PortInfo, bool> flagged = p => p.IsNew && !ignored(p);
+
+            Ports.Clear();
+            foreach (PortInfo p in ports.OrderByDescending(flagged).ThenBy(x => x.Port))
+            {
+                bool isIgnored = ignored(p);
+                Ports.Add(new PortViewModel(this)
+                {
+                    Port = p.Port, Process = (p.Process ?? "").ToUpperInvariant() + (isIgnored ? "  (IGNORED)" : ""), IsNew = flagged(p),
+                    ProgramPath = p.Path ?? "",
+                    Ignored = isIgnored,
+                    Note = p.Note == null ? "" : (p.Note.Text ?? "").ToUpperInvariant(),
+                    NoteText = p.Note == null ? "" : (p.Note.Text ?? ""),
+                    NoteLevel = p.Note == null ? "" : (p.Note.Level ?? "")
+                });
+            }
+            RefreshPrograms(ports);
+            int freshPorts = ports.Count(flagged);
+            PortSummary = "PORTS (" + Ports.Count + ")" + (freshPorts > 0 ? " " + freshPorts + " NEW" : "");
         }
 
         /// <summary>Rebuilds the two lists in Settings: what is ignored, and what could be.</summary>

@@ -1342,7 +1342,8 @@ static partial class Tests
             apply.Invoke(vm, new object[] { result });
 
             PortViewModel flagged = vm.Ports.First(p => p.Port == 32401);
-            Check("a flagged port says who is behind it and offers to ignore the program", flagged.IsNew && flagged.CanTrust && flagged.HasNote && flagged.Note.StartsWith("SIGNED BY PLEX") && !vm.Ports.First(p => p.Port == 32400).CanTrust && !vm.Ports.First(p => p.Port == 445).CanTrust);
+            Check("a flagged port says who is behind it and offers to ignore the program", flagged.IsNew && flagged.CanTrustFlagged && !flagged.CanTrustQuiet && flagged.HasNote && flagged.Note.StartsWith("SIGNED BY PLEX") && !vm.Ports.First(p => p.Port == 445).CanTrust);
+            Check("every other program Windows can name has a quiet Ignore button too", vm.Ports.First(p => p.Port == 32400).CanTrustQuiet && !vm.Ports.First(p => p.Port == 32400).CanTrustFlagged && vm.Ports.First(p => p.Port == 8080).CanTrustQuiet);
             Check("Settings lists every program with a port open, with its ports", vm.NoIgnoredPrograms && vm.ListeningPrograms.Count == 2 && vm.ListeningPrograms.Any(p => p.Name == "PLEX MEDIA SERVER.EXE" && p.Detail == "PORTS 32400, 32401") && vm.ListeningPrograms.Any(p => p.Name == "LAUNCHER.EXE" && p.Detail == "PORT 8080"));
 
             string asked = null;
@@ -1355,11 +1356,29 @@ static partial class Tests
             for (int i = 0; i < 100 && vm.IgnoredPrograms.Count == 0; i++) Thread.Sleep(50);
             Check("answering yes ignores it: saved, listed, and no longer offered", Store.LoadConfig().TrustedPrograms.SequenceEqual(new[] { plex }) && vm.IgnoredPrograms.Count == 1 && vm.IgnoredPrograms[0].Path == plex && !vm.NoIgnoredPrograms
                 && vm.ListeningPrograms.Count == 1 && vm.ListeningPrograms[0].Name == "LAUNCHER.EXE");
-            Check("its flagged port clears at once, and the change is logged", !vm.Ports.First(p => p.Port == 32401).IsNew && vm.Events.Any(e => e.RawMessage == "now ignoring ports opened by " + plex) && vm.FooterNote.StartsWith("IGNORING: "));
+            Check("its rows change at once: no flag, no button, marked as ignored", vm.Ports.Where(p => p.Port == 32400 || p.Port == 32401).All(p => !p.IsNew && !p.CanTrust && p.Ignored && p.Process.EndsWith("(IGNORED)")) && vm.PortSummary == "PORTS (4)" && vm.Ports.First(p => p.Port == 8080).CanTrustQuiet);
+            Check("the change is logged", vm.Events.Any(e => e.RawMessage == "now ignoring ports opened by " + plex) && vm.FooterNote.StartsWith("IGNORING: "));
 
             vm.IgnoredPrograms[0].ActionCommand.Execute(null);
             for (int i = 0; i < 100 && vm.IgnoredPrograms.Count > 0; i++) Thread.Sleep(50);
             Check("Stop ignoring takes it off the list and offers it again", Store.LoadConfig().TrustedPrograms.Count == 0 && vm.NoIgnoredPrograms && vm.ListeningPrograms.Count == 2 && vm.Events.Any(e => e.RawMessage == "stopped ignoring ports opened by " + plex));
+
+            // Add a program: browse to one that is not running.
+            const string launcher = "C:\\Games\\Other\\other.exe";
+            string picked = null;
+            vm.PickProgram = () => picked;
+            vm.Confirm = question => true;
+            vm.AddProgramCommand.Execute(null);
+            bool cancelled = Store.LoadConfig().TrustedPrograms.Count == 0;
+            picked = launcher;
+            vm.AddProgramCommand.Execute(null);
+            for (int i = 0; i < 100 && vm.IgnoredPrograms.Count == 0; i++) Thread.Sleep(50);
+            Check("Add a program ignores one you browse to, and cancelling does nothing", cancelled && Store.LoadConfig().TrustedPrograms.SequenceEqual(new[] { launcher }) && vm.IgnoredPrograms.Count == 1 && vm.IgnoredPrograms[0].Name == "OTHER.EXE");
+            vm.AddProgramCommand.Execute(null);
+            Thread.Sleep(200);
+            Check("adding the same program twice does not list it twice", Store.LoadConfig().TrustedPrograms.Count == 1 && vm.FooterNote.StartsWith("ALREADY IGNORED"));
+            vm.IgnoredPrograms[0].ActionCommand.Execute(null);
+            for (int i = 0; i < 100 && vm.IgnoredPrograms.Count > 0; i++) Thread.Sleep(50);
 
             vm.Confirm = question => true;
             vm.TrustProgram(vm.Ports.First(p => p.Port == 445));

@@ -3,6 +3,12 @@
 The newest version is at the top. The text under each version is what people see in the app
 when an update is available.
 
+## 0.8.5
+
+- Every program on the Ports tab now has an **Ignore program** button, not only flagged ones.
+- Settings, under Ignored programs, has **Add a program**: browse to any program and ignore it,
+  even when it is not running.
+
 ## 0.8.4
 
 - **Ignore a program.** Some programs, such as Plex or a game launcher, open different ports

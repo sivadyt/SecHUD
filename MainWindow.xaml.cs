@@ -22,6 +22,7 @@ namespace SecHUD
             viewModel.UpdateFound += OnUpdateFound;
             viewModel.Confirm = AskYesNo;
             viewModel.Ask = AskFriendly;
+            viewModel.PickProgram = BrowseForProgram;
             viewModel.RestartRequested += OnRestartRequested;
             viewModel.ShowMessage = ShowInfo;
             viewModel.PropertyChanged += OnViewModelChanged;
@@ -157,6 +158,19 @@ namespace SecHUD
         {
             return MessageBox.Show(this, question, "SecHUD", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.Yes)
                    == MessageBoxResult.Yes;
+        }
+
+        /// <summary>The standard Windows "open file" window, limited to programs. Null when cancelled.</summary>
+        private string BrowseForProgram()
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Choose the program to ignore",
+                Filter = "Programs (*.exe)|*.exe",
+                CheckFileExists = true,
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+            };
+            return dialog.ShowDialog(this) == true ? dialog.FileName : null;
         }
 
         private void ShowInfo(string text)
