@@ -71,6 +71,7 @@ static partial class Tests
             TrustNotes();
             GuestDevices();
             WeeklySummary();
+            IgnoredPrograms();
             PlatformTests();
         }
         catch (Exception ex)
@@ -1296,6 +1297,81 @@ static partial class Tests
         Check("Send summary now sends it straight away", posted.Count == 2 && vm.SettingsStatus.StartsWith("SUMMARY SENT"));
         var saved = Store.FromJson<AppConfig>(Store.ToJson(AppConfig.CreateDefault()));
         Check("guests are off and the weekly summary is on unless you change them", !saved.GuestPrivate && saved.GuestDays == 7 && saved.WeeklySummary);
+    }
+}
+
+static partial class Tests
+{
+    static void IgnoredPrograms()
+    {
+        const string plex = "C:\\Program Files\\Plex\\Plex Media Server\\Plex Media Server.exe";
+        const string fake = "C:\\Users\\ty\\AppData\\Local\\Temp\\Plex Media Server.exe";
+        var config = AppConfig.CreateDefault();
+        bool emptyByDefault = config.TrustedPrograms.Count == 0 && !Scanner.IsTrustedProgram(config, plex);
+        config.TrustedPrograms.Add(plex);
+        Check("an ignored program is recognised by its full path, whatever the letter case", emptyByDefault && Scanner.IsTrustedProgram(config, plex) && Scanner.IsTrustedProgram(config, plex.ToUpperInvariant()) && Scanner.IsTrustedProgram(config, "\"" + plex + "\""));
+        Check("a program that only borrows the name, from another folder, is not ignored", !Scanner.IsTrustedProgram(config, fake) && !Scanner.IsTrustedProgram(config, "Plex Media Server.exe") && !Scanner.IsTrustedProgram(config, "") && !Scanner.IsTrustedProgram(config, null) && !Scanner.IsTrustedProgram(null, plex));
+
+        config.TrustedPrograms.AddRange(new[] { "  \"" + plex + "\"  ", "", null, plex.ToLowerInvariant(), "C:\\Games\\launcher.exe" });
+        config.Normalize();
+        var roundTrip = Store.FromJson<AppConfig>(Store.ToJson(config));
+        Check("the ignored list is tidied and saved with the settings", config.TrustedPrograms.Count == 2 && roundTrip.TrustedPrograms.Count == 2 && roundTrip.TrustedPrograms.Contains("C:\\Games\\launcher.exe"));
+        var older = Store.FromJson<AppConfig>("{\"scanSeconds\":120}");
+        older.Normalize();
+        Check("settings from an older version load with nothing ignored", older.TrustedPrograms != null && older.TrustedPrograms.Count == 0);
+
+        // In the window.
+        Func<string, SignatureInfo> realReader = Trust.SignatureReader;
+        Func<string, bool> realExists = Trust.FileExists;
+        try
+        {
+            Trust.FileExists = path => true;
+            Trust.SignatureReader = path => new SignatureInfo { State = SignatureInfo.Trusted, Signer = "Plex, Inc." };
+            Trust.ClearCache();
+            File.Delete(Store.ConfigPath);
+
+            var vm = new MainViewModel();
+            var apply = typeof(MainViewModel).GetMethod("Apply", BindingFlags.NonPublic | BindingFlags.Instance);
+            ScanResult result = SampleResult();
+            result.NewEvents.Clear();
+            result.Ports.Clear();
+            result.Ports.Add(new PortInfo { Port = 445, Process = "System", Path = "" });
+            result.Ports.Add(new PortInfo { Port = 32400, Process = "Plex Media Server", Path = plex });
+            result.Ports.Add(new PortInfo { Port = 32401, Process = "Plex Media Server", Path = plex, IsNew = true, Note = new TrustNote { Level = TrustNote.Ok, Text = "Signed by Plex, Inc., and Windows trusts the signature.", Short = "signed by Plex, Inc." } });
+            result.Ports.Add(new PortInfo { Port = 8080, Process = "launcher", Path = "C:\\Games\\launcher.exe" });
+            apply.Invoke(vm, new object[] { result });
+
+            PortViewModel flagged = vm.Ports.First(p => p.Port == 32401);
+            Check("a flagged port says who is behind it and offers to ignore the program", flagged.IsNew && flagged.CanTrust && flagged.HasNote && flagged.Note.StartsWith("SIGNED BY PLEX") && !vm.Ports.First(p => p.Port == 32400).CanTrust && !vm.Ports.First(p => p.Port == 445).CanTrust);
+            Check("Settings lists every program with a port open, with its ports", vm.NoIgnoredPrograms && vm.ListeningPrograms.Count == 2 && vm.ListeningPrograms.Any(p => p.Name == "PLEX MEDIA SERVER.EXE" && p.Detail == "PORTS 32400, 32401") && vm.ListeningPrograms.Any(p => p.Name == "LAUNCHER.EXE" && p.Detail == "PORT 8080"));
+
+            string asked = null;
+            vm.Confirm = question => { asked = question; return false; };
+            vm.ListeningPrograms.First(p => p.Name.StartsWith("PLEX")).ActionCommand.Execute(null);
+            Check("pressing Ignore asks first, and shows who signed the program", asked != null && asked.Contains(plex) && asked.Contains("Signed by Plex, Inc.") && asked.Contains("Only this exact file is ignored") && vm.NoIgnoredPrograms && Store.LoadConfig().TrustedPrograms.Count == 0);
+
+            vm.Confirm = question => true;
+            vm.ListeningPrograms.First(p => p.Name.StartsWith("PLEX")).ActionCommand.Execute(null);
+            for (int i = 0; i < 100 && vm.IgnoredPrograms.Count == 0; i++) Thread.Sleep(50);
+            Check("answering yes ignores it: saved, listed, and no longer offered", Store.LoadConfig().TrustedPrograms.SequenceEqual(new[] { plex }) && vm.IgnoredPrograms.Count == 1 && vm.IgnoredPrograms[0].Path == plex && !vm.NoIgnoredPrograms
+                && vm.ListeningPrograms.Count == 1 && vm.ListeningPrograms[0].Name == "LAUNCHER.EXE");
+            Check("its flagged port clears at once, and the change is logged", !vm.Ports.First(p => p.Port == 32401).IsNew && vm.Events.Any(e => e.RawMessage == "now ignoring ports opened by " + plex) && vm.FooterNote.StartsWith("IGNORING: "));
+
+            vm.IgnoredPrograms[0].ActionCommand.Execute(null);
+            for (int i = 0; i < 100 && vm.IgnoredPrograms.Count > 0; i++) Thread.Sleep(50);
+            Check("Stop ignoring takes it off the list and offers it again", Store.LoadConfig().TrustedPrograms.Count == 0 && vm.NoIgnoredPrograms && vm.ListeningPrograms.Count == 2 && vm.Events.Any(e => e.RawMessage == "stopped ignoring ports opened by " + plex));
+
+            vm.Confirm = question => true;
+            vm.TrustProgram(vm.Ports.First(p => p.Port == 445));
+            vm.TrustProgram(null);
+            Check("a port whose program Windows will not name cannot be ignored by mistake", Store.LoadConfig().TrustedPrograms.Count == 0);
+        }
+        finally
+        {
+            Trust.SignatureReader = realReader;
+            Trust.FileExists = realExists;
+            Trust.ClearCache();
+        }
     }
 }
 

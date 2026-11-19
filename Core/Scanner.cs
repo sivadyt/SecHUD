@@ -176,7 +176,10 @@ namespace SecHUD
             foreach (PortInfo p in ports.Where(x => x.IsNew))
             {
                 if (!state.NewPorts.Contains(p.Port))
-                    AddEvent(events, now, "new-port", "high", "new listening port " + p.Port + " (" + p.Process + ")");
+                {
+                    string about = p.Note == null || string.IsNullOrEmpty(p.Note.Short) ? "" : ", " + p.Note.Short;
+                    AddEvent(events, now, "new-port", "high", "new listening port " + p.Port + " (" + p.Process + about + ")");
+                }
             }
 
             var pcRows = new List<CheckRow> { antivirus, firewall, logins, portRow, autorunRow, accountRow, detectionRow };
@@ -486,6 +489,20 @@ namespace SecHUD
             }
         }
 
+        /// <summary>The full path of a running program. Replaceable for tests.</summary>
+        public static Func<int, string> ProcessPathReader = Native.GetProcessPath;
+
+        /// <summary>
+        /// True when this exact program file is on the trusted list. The match is on the whole
+        /// path, so malware that only borrows a trusted program's name gets no pass.
+        /// </summary>
+        public static bool IsTrustedProgram(AppConfig config, string path)
+        {
+            if (config == null || config.TrustedPrograms == null || string.IsNullOrWhiteSpace(path)) return false;
+            string wanted = path.Trim().Trim('"');
+            return config.TrustedPrograms.Any(p => string.Equals((p ?? "").Trim().Trim('"'), wanted, StringComparison.OrdinalIgnoreCase));
+        }
+
         private static CheckRow CheckPorts(AppConfig config, bool approve, List<EventEntry> events,
             DateTime now, out List<PortInfo> ports)
         {
@@ -521,13 +538,29 @@ namespace SecHUD
                 Dictionary<int, int> pids = Native.GetListenerPids();
                 foreach (int port in all)
                 {
-                    string process = "";
+                    var info = new PortInfo { Port = port, Process = "", Path = "" };
                     int pid;
                     if (pids.TryGetValue(port, out pid))
                     {
-                        try { process = Process.GetProcessById(pid).ProcessName; } catch { process = "pid " + pid; }
+                        try { info.Process = Process.GetProcessById(pid).ProcessName; } catch { info.Process = "pid " + pid; }
+
+                        // The full path is what an ignored program is recognised by, and what Settings offers to ignore.
+                        info.Path = ProcessPathReader(pid) ?? "";
+                        if (fresh.Contains(port))
+                        {
+                            if (IsTrustedProgram(config, info.Path))
+                            {
+                                info.Trusted = true;
+                                fresh.Remove(port);
+                            }
+                            else if (info.Path.Length > 0)
+                            {
+                                info.Note = Trust.Describe(new AutorunItem { Kind = "run", Name = "port|" + info.Path, Command = "\"" + info.Path + "\"" });
+                            }
+                        }
                     }
-                    ports.Add(new PortInfo { Port = port, Process = process, IsNew = fresh.Contains(port) });
+                    info.IsNew = fresh.Contains(port);
+                    ports.Add(info);
                 }
 
                 return new CheckRow(label, all.Count + " | " + fresh.Count + " new", fresh.Count > 0, fresh.Count == 0);

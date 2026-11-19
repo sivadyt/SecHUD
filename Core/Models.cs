@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.Serialization;
 
 namespace SecHUD
@@ -61,6 +62,13 @@ namespace SecHUD
         /// <summary>Send one Discord message a week with what happened, so a quiet app still shows it is working.</summary>
         [DataMember(Name = "weeklySummary", Order = 30)] public bool WeeklySummary { get; set; }
 
+        /// <summary>
+        /// Programs whose listening ports are never flagged, as full paths. For software such as a
+        /// media server that opens different ports every time it runs. Only the exact file counts:
+        /// a program with the same name somewhere else is still flagged.
+        /// </summary>
+        [DataMember(Name = "trustedPrograms", Order = 31)] public List<string> TrustedPrograms { get; set; }
+
         /// <summary>False until the first-run welcome has been answered.</summary>
         [DataMember(Name = "welcomed", Order = 27)] public bool Welcomed { get; set; }
 
@@ -113,6 +121,7 @@ namespace SecHUD
             GuestPrivate = false;
             GuestDays = 7;
             WeeklySummary = true;
+            TrustedPrograms = new List<string>();
         }
 
         public static AppConfig CreateDefault()
@@ -140,6 +149,9 @@ namespace SecHUD
             if (HomeWifiName == null) HomeWifiName = "";
             if (WatchMisses < 1 || WatchMisses > 20) WatchMisses = 2;
             if (GuestDays < 1 || GuestDays > 365) GuestDays = 7;
+            if (TrustedPrograms == null) TrustedPrograms = new List<string>();
+            TrustedPrograms = TrustedPrograms.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim().Trim('"'))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             int minutes;
             if (!Quiet.TryParseTime(QuietStart, out minutes)) QuietStart = "23:00";
             if (!Quiet.TryParseTime(QuietEnd, out minutes)) QuietEnd = "07:00";
@@ -279,6 +291,13 @@ namespace SecHUD
         public int Port { get; set; }
         public string Process { get; set; }
         public bool IsNew { get; set; }
+
+        /// <summary>Full path of the program that opened the port, when Windows will say.</summary>
+        public string Path { get; set; }
+        /// <summary>True when the port is not in the baseline but its program is on the trusted list.</summary>
+        public bool Trusted { get; set; }
+        /// <summary>For new ports: what is known about the program (signed, by whom, where it lives).</summary>
+        public TrustNote Note { get; set; }
     }
 
     /// <summary>Everything one scan produced. Handed from the scanner to the window.</summary>

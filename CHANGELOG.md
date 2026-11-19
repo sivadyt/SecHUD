@@ -3,6 +3,14 @@
 The newest version is at the top. The text under each version is what people see in the app
 when an update is available.
 
+## 0.8.4
+
+- **Ignore a program.** Some programs, such as Plex or a game launcher, open different ports
+  every time they run and kept setting off alerts. In Settings, under Ignored programs, pick the
+  program and press Ignore. A flagged port on the Ports tab has the same button. Only that exact
+  program file is ignored, and Stop ignoring undoes it.
+- A new listening port now says who is behind it: the program, whether it is signed, and by whom.
+
 ## 0.8.3
 
 - **"Is this safe?" notes.** A new startup item now says what is behind it in plain words:

@@ -8,7 +8,7 @@
     <LangVersion>7.3</LangVersion>
     <RootNamespace>SecHUD</RootNamespace>
     <AssemblyName>SecHUD</AssemblyName>
-    <Version>0.8.3</Version>
+    <Version>0.8.4</Version>
     <Authors>Ty</Authors>
     <Product>SecHUD</Product>
     <Description>Home network security monitor</Description>

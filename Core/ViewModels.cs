@@ -231,10 +231,24 @@ namespace SecHUD
         public PortViewModel(MainViewModel owner)
         {
             ApproveCommand = new RelayCommand(o => owner.ApprovePort(this));
+            TrustCommand = new RelayCommand(o => owner.TrustProgram(this));
         }
+
+        /// <summary>Stops flagging any port this program opens.</summary>
+        public ICommand TrustCommand { get; private set; }
 
         public int Port { get; set; }
         public string Process { get; set; }
+
+        /// <summary>The program's full path, when known. Ignoring a program needs it.</summary>
+        public string ProgramPath { get; set; }
+        public bool CanTrust { get { return IsNew && !string.IsNullOrEmpty(ProgramPath); } }
+
+        /// <summary>For a new port: what is known about the program behind it.</summary>
+        public string Note { get; set; }
+        public string NoteLevel { get; set; }
+        public string NoteText { get; set; }
+        public bool HasNote { get { return IsNew && !string.IsNullOrEmpty(Note); } }
     }
 
     public class AutorunViewModel : FlaggedViewModel
@@ -262,6 +276,25 @@ namespace SecHUD
         /// <summary>The note as written, for the Deny question.</summary>
         public string NoteText { get; set; }
         public bool HasNote { get { return IsNew && !string.IsNullOrEmpty(Note); } }
+    }
+
+    /// <summary>One line in Settings under Ignored programs: either a program already ignored, or one that could be.</summary>
+    public class ProgramViewModel
+    {
+        public ProgramViewModel(string path, string detail, Action<string> action)
+        {
+            Path = path ?? "";
+            int cut = Math.Max(Path.LastIndexOf('\\'), Path.LastIndexOf('/'));
+            Name = (cut < 0 ? Path : Path.Substring(cut + 1)).ToUpperInvariant();
+            Detail = detail ?? "";
+            ActionCommand = new RelayCommand(o => action(Path));
+        }
+
+        public string Name { get; private set; }
+        public string Path { get; private set; }
+        /// <summary>For a program that could be ignored: the ports it has open right now.</summary>
+        public string Detail { get; private set; }
+        public ICommand ActionCommand { get; private set; }
     }
 
     /// <summary>A startup item that was denied and can be put back.</summary>
@@ -461,6 +494,8 @@ namespace SecHUD
             StatusBars = new ObservableCollection<BarViewModel>();
             UptimeRows = new ObservableCollection<RowViewModel>();
             Removed = new ObservableCollection<RemovedViewModel>();
+            IgnoredPrograms = new ObservableCollection<ProgramViewModel>();
+            ListeningPrograms = new ObservableCollection<ProgramViewModel>();
 
             ScanCommand = new RelayCommand(o => { var ignored = ScanAsync(false); });
             ApproveAllCommand = new RelayCommand(o => { var ignored = ScanAsync(true); });
@@ -493,6 +528,13 @@ namespace SecHUD
         public ObservableCollection<BarViewModel> StatusBars { get; private set; }
         public ObservableCollection<RowViewModel> UptimeRows { get; private set; }
         public ObservableCollection<RemovedViewModel> Removed { get; private set; }
+
+        /// <summary>Programs whose ports are never flagged. Each has a Remove button in Settings.</summary>
+        public ObservableCollection<ProgramViewModel> IgnoredPrograms { get; private set; }
+        /// <summary>Programs with a port open right now that are not ignored yet. Each has an Ignore button in Settings.</summary>
+        public ObservableCollection<ProgramViewModel> ListeningPrograms { get; private set; }
+        public bool NoIgnoredPrograms { get { return IgnoredPrograms.Count == 0; } }
+        public bool NoListeningPrograms { get { return ListeningPrograms.Count == 0; } }
 
         public ICommand FinishWelcomeCommand { get; private set; }
         public ICommand SendSummaryCommand { get; private set; }
@@ -1078,8 +1120,16 @@ namespace SecHUD
             Ports.Clear();
             foreach (PortInfo p in result.Ports.OrderByDescending(x => x.IsNew).ThenBy(x => x.Port))
             {
-                Ports.Add(new PortViewModel(this) { Port = p.Port, Process = (p.Process ?? "").ToUpperInvariant(), IsNew = p.IsNew });
+                Ports.Add(new PortViewModel(this)
+                {
+                    Port = p.Port, Process = (p.Process ?? "").ToUpperInvariant() + (p.Trusted ? "  (TRUSTED PROGRAM)" : ""), IsNew = p.IsNew,
+                    ProgramPath = p.Path ?? "",
+                    Note = p.Note == null ? "" : (p.Note.Text ?? "").ToUpperInvariant(),
+                    NoteText = p.Note == null ? "" : (p.Note.Text ?? ""),
+                    NoteLevel = p.Note == null ? "" : (p.Note.Level ?? "")
+                });
             }
+            RefreshPrograms(result.Ports);
             int freshPorts = result.Ports.Count(p => p.IsNew);
             PortSummary = "PORTS (" + Ports.Count + ")" + (freshPorts > 0 ? " " + freshPorts + " NEW" : "");
 
@@ -1561,6 +1611,95 @@ namespace SecHUD
             if (port == null || !port.IsNew) return;
             port.IsNew = false;
             RunApproval(() => scanner.ApprovePort(port.Port), "approved listening port " + port.Port, true);
+        }
+
+        /// <summary>
+        /// Ignore program (the button on a flagged port): from now on no port this exact program
+        /// opens is flagged. For software that opens different ports each time it runs, where
+        /// approving ports one by one never ends.
+        /// </summary>
+        public void TrustProgram(PortViewModel port)
+        {
+            if (port == null || !port.CanTrust) return;
+            IgnoreProgram(port.ProgramPath, port.NoteText);
+        }
+
+        /// <summary>Adds a program to the ignored list, after asking.</summary>
+        public async void IgnoreProgram(string path, string note)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            if (string.IsNullOrEmpty(note))
+            {
+                // Chosen from Settings: say what is known about the program before it is trusted.
+                TrustNote known = null;
+                try { known = Trust.DescribeCommand("\"" + path + "\""); } catch { }
+                note = known == null ? "" : known.Text;
+            }
+            string question = "Ignore ports opened by this program?\n\n" + path + "\n"
+                + (string.IsNullOrEmpty(note) ? "" : "\n" + note + "\n")
+                + "\nEvery port it opens from now on is accepted without an alert. Only this exact file is ignored: "
+                + "a program with the same name in another folder is still flagged. You can undo this in Settings under Ignored programs.";
+            if (Confirm == null || !Confirm(question)) return;
+            await ChangeIgnored(path, true);
+        }
+
+        /// <summary>Takes a program off the ignored list. Its ports are flagged again like anyone else's.</summary>
+        public async void StopIgnoringProgram(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            await ChangeIgnored(path, false);
+        }
+
+        private async Task ChangeIgnored(string path, bool ignore)
+        {
+            try
+            {
+                await Task.Run(() =>
+                {
+                    AppConfig updated = Store.LoadConfig();
+                    updated.TrustedPrograms.RemoveAll(p => string.Equals((p ?? "").Trim().Trim('"'), path, StringComparison.OrdinalIgnoreCase));
+                    if (ignore) updated.TrustedPrograms.Add(path);
+                    updated.Normalize();
+                    Store.Save(Store.ConfigPath, updated);
+                });
+                config = Store.LoadConfig();
+                RefreshPrograms(lastResult == null ? new List<PortInfo>() : lastResult.Ports);
+                foreach (PortViewModel row in Ports.Where(r => ignore && string.Equals(r.ProgramPath, path, StringComparison.OrdinalIgnoreCase))) row.IsNew = false;
+                FooterNote = ((ignore ? "IGNORING: " : "NO LONGER IGNORING: ") + path).ToUpperInvariant();
+                AddEvents(new List<EventEntry>
+                {
+                    new EventEntry { Ts = DateTime.Now.ToString("s"), Type = "approve", Severity = "info",
+                        Msg = (ignore ? "now ignoring ports opened by " : "stopped ignoring ports opened by ") + path }
+                });
+                RequestPcRefresh(ignore ? "ignored program" : "ignore removed");
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("ignore program", ex);
+                if (ShowMessage != null) ShowMessage("Could not save that.\n\n" + ex.Message);
+            }
+        }
+
+        /// <summary>Rebuilds the two lists in Settings: what is ignored, and what could be.</summary>
+        private void RefreshPrograms(List<PortInfo> ports)
+        {
+            IgnoredPrograms.Clear();
+            foreach (string path in config.TrustedPrograms.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+                IgnoredPrograms.Add(new ProgramViewModel(path, "", StopIgnoringProgram));
+
+            ListeningPrograms.Clear();
+            var groups = (ports ?? new List<PortInfo>())
+                .Where(p => !string.IsNullOrEmpty(p.Path) && !Scanner.IsTrustedProgram(config, p.Path))
+                .GroupBy(p => p.Path, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
+            foreach (var group in groups)
+            {
+                List<int> numbers = group.Select(p => p.Port).OrderBy(n => n).ToList();
+                string detail = (numbers.Count == 1 ? "PORT " : "PORTS ") + string.Join(", ", numbers.Take(6)) + (numbers.Count > 6 ? " AND " + (numbers.Count - 6) + " MORE" : "");
+                ListeningPrograms.Add(new ProgramViewModel(group.Key, detail, path => IgnoreProgram(path, "")));
+            }
+            Raise("NoIgnoredPrograms");
+            Raise("NoListeningPrograms");
         }
 
         public void ApproveAutorun(AutorunViewModel item)

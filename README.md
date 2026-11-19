@@ -87,6 +87,21 @@ it, and from then on updates are one click.
 The first scan becomes the baseline. After that, anything new flips the status to ELEVATED until
 you approve it. Every change is appended to `events.log`.
 
+## Ignoring a program
+
+A media server, a game launcher or a sync tool can open a different port every time it runs.
+Approving ports one by one never ends, so you can ignore the program instead:
+
+- In Settings, under Ignored programs, every program that has a port open right now is listed.
+  Press Ignore next to it.
+- Or, when a port is flagged on the Ports tab, press Ignore program on that row.
+
+You are asked first and shown who signed the program. From then on no port it opens is
+flagged. The rule matches the full path of the program file, so something that only borrows
+the name from another folder (a favourite trick of malware) is still flagged. Stop ignoring,
+in the same place, undoes it. Everything else about that program is still watched: if it adds
+itself to startup, you still hear about it.
+
 ## Live watch
 
 A full scan runs every two minutes (you can change that). Between scans the live watch lets

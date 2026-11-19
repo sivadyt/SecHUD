@@ -250,6 +250,42 @@ namespace SecHUD
             return null;
         }
 
+        // ---- which program is that ----
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, int processId);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, System.Text.StringBuilder name, ref uint size);
+
+        [DllImport("kernel32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        /// <summary>The full path of a running program, or "" when Windows will not say (a protected system process).</summary>
+        internal static string GetProcessPath(int processId)
+        {
+            const uint queryLimitedInformation = 0x1000; // the least access there is, enough for the path
+            IntPtr handle = IntPtr.Zero;
+            try
+            {
+                handle = OpenProcess(queryLimitedInformation, false, processId);
+                if (handle == IntPtr.Zero) return "";
+                var name = new System.Text.StringBuilder(1024);
+                uint size = (uint)name.Capacity;
+                return QueryFullProcessImageName(handle, 0, name, ref size) ? name.ToString(0, (int)size) : "";
+            }
+            catch
+            {
+                return "";
+            }
+            finally
+            {
+                if (handle != IntPtr.Zero) CloseHandle(handle);
+            }
+        }
+
         private const int AfInet = 2;
         private const int TcpTableOwnerPidListener = 3;
 

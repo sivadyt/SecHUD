@@ -169,7 +169,7 @@
                         <StackPanel Grid.Row="0">
                         </StackPanel>
                         <Grid Grid.Row="1" Height="26">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/><ColumnDefinition Width="330"/></Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="TCP PORT" Style="{StaticResource HeaderText}"/><TextBlock Grid.Column="1" Text="LISTENING PROCESS" Style="{StaticResource HeaderText}"/>
                         </Grid>
                         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -178,12 +178,16 @@
                                     <DataTemplate>
                                         <Border BorderBrush="{StaticResource AccentFaintBrush}" BorderThickness="0,1,0,0">
                                             <Grid MinHeight="32">
-                                                <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/><ColumnDefinition Width="330"/></Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions><RowDefinition MinHeight="32"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding Note}" Style="{StaticResource TrustText}" Margin="0,0,14,8"
+                                                           Visibility="{Binding HasNote, Converter={StaticResource BoolToVis}}" ToolTip="{Binding ProgramPath}"/>
                                                 <TextBlock Grid.Column="0" Text="{Binding Port}" Style="{StaticResource CellText}" Foreground="{StaticResource CyanBrush}"/>
-                                                <TextBlock Grid.Column="1" Text="{Binding Process}" Style="{StaticResource CellText}"/>
+                                                <TextBlock Grid.Column="1" Text="{Binding Process}" Style="{StaticResource CellText}" ToolTip="{Binding ProgramPath}"/>
                                                 <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0">
                                                     <TextBlock Text="{Binding Flag}" Style="{StaticResource PortFlagText}" Margin="0,0,10,0"/>
                                                     <Button Style="{StaticResource HazardButton}" Content="APPROVE" Command="{Binding ApproveCommand}" ToolTip="This port is expected. Stop flagging it." Visibility="{Binding IsNew, Converter={StaticResource BoolToVis}}"/>
+                                                    <Button Style="{StaticResource HazardButton}" Content="IGNORE PROGRAM" Margin="8,0,0,0" Command="{Binding TrustCommand}" ToolTip="Stop flagging every port this program opens, now and later. For programs such as a media server or a game launcher that use different ports each time. You are asked first, and you can undo it in Settings." Visibility="{Binding CanTrust, Converter={StaticResource BoolToVis}}"/>
                                                 </StackPanel>
                                             </Grid>
                                         </Border>
@@ -579,6 +583,44 @@
                                     <TextBlock Text="{Binding VersionText}" Style="{StaticResource StatusLine}" VerticalAlignment="Center" Margin="14,0,0,0"/>
                                 </StackPanel>
                                 <TextBlock Style="{StaticResource HintText}" Text="The check only asks GitHub for the latest version number and sends nothing about you or your network. When a new version is out, a yellow button appears at the top. Click it and SecHUD downloads the update, checks it, and restarts by itself. Nothing is installed until you click."/>
+
+                                <Rectangle Height="1" Fill="{StaticResource AccentDimBrush}" Margin="0,14,0,14"/>
+                                <TextBlock Text="IGNORED PROGRAMS" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock Style="{StaticResource HintText}" Margin="0,0,0,10" Text="Some programs, such as a media server or a game launcher, open different ports every time they run, so approving ports one at a time never ends. Ignore the program and none of its ports are flagged again. Only the exact file is ignored: a program with the same name in another folder is still flagged. These take effect straight away, with no need to press Save."/>
+
+                                <TextBlock Text="IGNORED NOW" Style="{StaticResource HeaderText}" Margin="0,0,0,4"/>
+                                <TextBlock Text="NONE YET" Style="{StaticResource StatusLine}" Margin="0,0,0,6" Visibility="{Binding NoIgnoredPrograms, Converter={StaticResource BoolToVis}}"/>
+                                <ItemsControl ItemsSource="{Binding IgnoredPrograms}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border BorderBrush="{StaticResource AccentFaintBrush}" BorderThickness="0,1,0,0">
+                                                <Grid MinHeight="32">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{Binding Name}" Style="{StaticResource CellText}" Foreground="{StaticResource CyanBrush}" Margin="0,0,12,0" ToolTip="{Binding Path}"/>
+                                                    <TextBlock Grid.Column="1" Text="{Binding Path}" Style="{StaticResource CellText}" Foreground="{StaticResource MutedBrush}" Margin="0,0,12,0" ToolTip="{Binding Path}"/>
+                                                    <Button Grid.Column="2" Style="{StaticResource SmallButton}" Content="STOP IGNORING" VerticalAlignment="Center" Command="{Binding ActionCommand}" ToolTip="Flag this program's new ports again, like any other program."/>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <TextBlock Text="PROGRAMS WITH A PORT OPEN RIGHT NOW" Style="{StaticResource HeaderText}" Margin="0,16,0,4"/>
+                                <TextBlock Text="NOTHING TO SHOW YET. WAIT FOR THE FIRST SCAN." Style="{StaticResource StatusLine}" Margin="0,0,0,6" Visibility="{Binding NoListeningPrograms, Converter={StaticResource BoolToVis}}"/>
+                                <ItemsControl ItemsSource="{Binding ListeningPrograms}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border BorderBrush="{StaticResource AccentFaintBrush}" BorderThickness="0,1,0,0">
+                                                <Grid MinHeight="32">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{Binding Name}" Style="{StaticResource CellText}" Margin="0,0,12,0" ToolTip="{Binding Path}"/>
+                                                    <TextBlock Grid.Column="1" Text="{Binding Detail}" Style="{StaticResource CellText}" Foreground="{StaticResource MutedBrush}" Margin="0,0,12,0" ToolTip="{Binding Path}"/>
+                                                    <Button Grid.Column="2" Style="{StaticResource HazardButton}" Content="IGNORE" VerticalAlignment="Center" Command="{Binding ActionCommand}" ToolTip="Never flag ports opened by this program. You are asked first, and shown who signed it."/>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
 
                                 <Rectangle Height="1" Fill="{StaticResource AccentDimBrush}" Margin="0,14,0,14"/>
                                 <TextBlock Text="WATCHED HOSTS" Style="{StaticResource SectionTitle}"/>
