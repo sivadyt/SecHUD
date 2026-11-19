@@ -12,7 +12,7 @@ namespace SecHUD
     /// <summary>
     /// Asks the router, over UPnP, which ports it forwards from the internet to devices inside.
     /// Any program on the network can ask a UPnP router to open a port, so this list is worth
-    /// watching. Read-only: it never adds or removes a forward.
+    /// watching. It never adds a forward, and it removes one only when you press Deny on it.
     /// </summary>
     public static class Upnp
     {
@@ -192,6 +192,50 @@ namespace SecHUD
         {
             XElement element = parent.Elements().FirstOrDefault(e => e.Name.LocalName == name);
             return element == null ? "" : element.Value.Trim();
+        }
+
+        /// <summary>Asks the router to close a forward. Returns "" when it is gone, otherwise why not. Tests swap this.</summary>
+        public static Func<string, int, string> Deleter = DeleteMapping;
+
+        /// <summary>
+        /// Closes one port forward (the UPnP DeletePortMapping request). Routers decide who may do
+        /// this: most let any device on the network, some only the device that opened it.
+        /// </summary>
+        public static string DeleteMapping(string protocol, int externalPort)
+        {
+            string proto = (protocol ?? "").Trim().ToUpperInvariant();
+            if ((proto != "TCP" && proto != "UDP") || externalPort < 1 || externalPort > 65535) return "that is not a forward that can be closed";
+            if (cachedControlUrl == null) return "the router has not been reached yet. Press Scan now and try again";
+            try
+            {
+                Soap("DeletePortMapping", "<NewRemoteHost></NewRemoteHost><NewExternalPort>" + externalPort + "</NewExternalPort><NewProtocol>" + proto + "</NewProtocol>");
+                return "";
+            }
+            catch (WebException ex)
+            {
+                string body = "";
+                try
+                {
+                    if (ex.Response != null) body = ReadLimited(ex.Response.GetResponseStream());
+                }
+                catch { }
+                return DescribeFault(body);
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+        }
+
+        /// <summary>Turns the router's error answer into plain words. "" means the forward was already gone, which is fine.</summary>
+        public static string DescribeFault(string soapXml)
+        {
+            string code = ParseValue(soapXml, "errorCode");
+            string text = ParseValue(soapXml, "errorDescription");
+            if (code == "714") return ""; // no such entry: nothing left to close
+            if (code == "606") return "the router refused: it only lets the device that opened a forward close it. Close it from that device, or in the router's own settings page";
+            if (code.Length > 0) return "the router refused (" + code + (text.Length > 0 ? ": " + Clean(text) : "") + ")";
+            return "the router did not answer the request";
         }
 
         private static string Clean(string text)

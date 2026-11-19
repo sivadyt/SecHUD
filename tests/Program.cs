@@ -72,6 +72,7 @@ static partial class Tests
             GuestDevices();
             WeeklySummary();
             IgnoredPrograms();
+            RouterDenyAndIgnore();
             PlatformTests();
         }
         catch (Exception ex)
@@ -1390,6 +1391,120 @@ static partial class Tests
             Trust.SignatureReader = realReader;
             Trust.FileExists = realExists;
             Trust.ClearCache();
+        }
+    }
+}
+
+static partial class Tests
+{
+    static void RouterDenyAndIgnore()
+    {
+        // What this router really sends: a name, but no device.
+        var plex1 = new ForwardInfo { Protocol = "TCP", ExternalPort = 17764, InternalClient = "0.0.0.0", InternalPort = 0, Description = "Plex Media Server" };
+        var plex2 = new ForwardInfo { Protocol = "TCP", ExternalPort = 17765, InternalClient = "0.0.0.0", InternalPort = 0, Description = "Plex Media Server" };
+        var game = new ForwardInfo { Protocol = "UDP", ExternalPort = 9308, InternalClient = "192.168.1.200", InternalPort = 9308, Description = "Game" };
+        var nameless = new ForwardInfo { Protocol = "TCP", ExternalPort = 4444, InternalClient = "192.168.1.77", InternalPort = 4444, Description = "" };
+        Check("a forward whose device the router hides says so, not 0.0.0.0", plex1.TargetHidden && plex1.TargetText == "not shown by the router" && plex1.Summary == "TCP 17764 (Plex Media Server), the router does not say which device it goes to"
+            && !game.TargetHidden && game.TargetText == "192.168.1.200:9308" && game.Summary == "UDP 9308 -> 192.168.1.200:9308 (Game)");
+
+        var config = AppConfig.CreateDefault();
+        bool noneAtFirst = !Scanner.MatchesForwardRule(config, plex1);
+        ForwardRule byName = Scanner.RuleFor(plex1);
+        ForwardRule byDevice = Scanner.RuleFor(game);
+        Check("an ignore rule is tied to the device when the router names one", byName.Description == "Plex Media Server" && byName.Client == "" && byDevice.Description == "Game" && byDevice.Client == "192.168.1.200" && Scanner.RuleFor(nameless) == null && Scanner.RuleFor(null) == null);
+
+        config.IgnoredForwards.Add(byName);
+        config.IgnoredForwards.Add(byDevice);
+        var gameElsewhere = new ForwardInfo { Protocol = "UDP", ExternalPort = 9999, InternalClient = "192.168.1.66", InternalPort = 9999, Description = "Game" };
+        Check("a rule matches by name, on any port", noneAtFirst && Scanner.MatchesForwardRule(config, plex1) && Scanner.MatchesForwardRule(config, plex2) && Scanner.MatchesForwardRule(config, new ForwardInfo { Protocol = "TCP", ExternalPort = 1, Description = " plex media server " }));
+        Check("a different name, a different device, or no name is still flagged", !Scanner.MatchesForwardRule(config, new ForwardInfo { Description = "Plex Media Server 2" }) && !Scanner.MatchesForwardRule(config, gameElsewhere) && Scanner.MatchesForwardRule(config, game) && !Scanner.MatchesForwardRule(config, nameless) && !Scanner.MatchesForwardRule(null, plex1));
+
+        config.IgnoredForwards.AddRange(new[] { new ForwardRule { Description = "plex media server", Client = "" }, new ForwardRule { Description = "  ", Client = "" }, null });
+        config.Normalize();
+        var saved = Store.FromJson<AppConfig>(Store.ToJson(config));
+        var older = Store.FromJson<AppConfig>("{\"scanSeconds\":120}"); older.Normalize();
+        Check("forward rules are tidied, saved, and absent in older settings", config.IgnoredForwards.Count == 2 && saved.IgnoredForwards.Count == 2 && saved.IgnoredForwards[0].Description == "Plex Media Server" && older.IgnoredForwards.Count == 0);
+
+        // In a scan: the baseline holds one Plex forward, then Plex asks for another port.
+        if (File.Exists(Store.ForwardsPath)) File.Delete(Store.ForwardsPath);
+        var router = new RouterSnapshot { Found = true };
+        router.Forwards.Add(plex1);
+        var events = new List<EventEntry>();
+        Scanner.EvaluateForwards(router, false, events, DateTime.Now, new List<string>(), AppConfig.CreateDefault());
+        router.Forwards.Add(plex2);
+        router.Forwards.Add(nameless);
+        events.Clear();
+        CheckRow strict = Scanner.EvaluateForwards(router, false, events, DateTime.Now, new List<string>(), AppConfig.CreateDefault());
+        Check("without a rule, each new port Plex asks for is an alert", strict.IsAlert && strict.Value == "3 | 2 new" && events.Any(e => e.Msg == "new port forward on the router: TCP 17765 (Plex Media Server), the router does not say which device it goes to"));
+
+        foreach (ForwardInfo f in router.Forwards) f.IsNew = false;
+        events.Clear();
+        CheckRow relaxed = Scanner.EvaluateForwards(router, false, events, DateTime.Now, new List<string>(), config);
+        Check("with the rule, Plex is quiet and the nameless forward still alerts", relaxed.IsAlert && relaxed.Value == "3 | 1 new" && plex2.Ignored && !plex2.IsNew && nameless.IsNew && events.Count == 1 && events[0].Msg.Contains("TCP 4444"));
+
+        Check("the router's refusals are put in plain words", Upnp.DescribeFault("<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><s:Fault><detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>606</errorCode><errorDescription>Action not authorized</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>").Contains("only lets the device that opened a forward close it")
+            && Upnp.DescribeFault("<x><errorCode>714</errorCode><errorDescription>NoSuchEntryInArray</errorDescription></x>") == ""
+            && Upnp.DescribeFault("<x><errorCode>501</errorCode><errorDescription>Action Failed</errorDescription></x>") == "the router refused (501: Action Failed)"
+            && Upnp.DescribeFault("") == "the router did not answer the request" && Upnp.DescribeFault("not xml") == "the router did not answer the request");
+        Check("a request that makes no sense never reaches the router", Upnp.DeleteMapping("ICMP", 80) == "that is not a forward that can be closed" && Upnp.DeleteMapping("TCP", 0) == "that is not a forward that can be closed" && Upnp.DeleteMapping("TCP", 70000).Length > 0 && Upnp.DeleteMapping(null, 80).Length > 0);
+
+        // In the window.
+        Func<string, int, string> realDeleter = Upnp.Deleter;
+        try
+        {
+            File.Delete(Store.ConfigPath);
+            Store.Save(Store.ForwardsPath, new List<string> { plex1.Key, plex2.Key });
+            var asked = new List<string>();
+            var closed = new List<string>();
+            string routerSays = "";
+            Upnp.Deleter = (protocol, port) => { closed.Add(protocol + " " + port); return routerSays; };
+
+            var vm = new MainViewModel();
+            var apply = typeof(MainViewModel).GetMethod("Apply", BindingFlags.NonPublic | BindingFlags.Instance);
+            string shown = null;
+            vm.ShowMessage = text => shown = text;
+            ScanResult result = SampleResult();
+            result.NewEvents.Clear();
+            result.Router = new RouterSnapshot { Found = true, ExternalIp = "203.0.113.7" };
+            plex2.IsNew = true; plex2.Ignored = false; nameless.IsNew = false;
+            result.Router.Forwards.AddRange(new[] { plex1, plex2, nameless });
+            apply.Invoke(vm, new object[] { result });
+
+            ForwardViewModel flagged = vm.Forwards[0];
+            Check("the Router tab offers Ignore on named forwards and shows hidden devices plainly", flagged.Port == "TCP 17765" && flagged.IsNew && flagged.CanIgnoreFlagged && flagged.Target == "NOT SHOWN BY THE ROUTER"
+                && vm.Forwards.First(f => f.Port == "TCP 17764").CanIgnoreQuiet && !vm.Forwards.First(f => f.Port == "TCP 4444").CanIgnore);
+
+            vm.Confirm = question => { asked.Add(question); return false; };
+            flagged.DenyCommand.Execute(null);
+            flagged.IgnoreCommand.Execute(null);
+            Check("Deny and Ignore both ask first, and Ignore is honest about its limit", asked.Count == 2 && asked[0].Contains("Close this port on the router?") && asked[0].Contains("TCP 17765 (Plex Media Server)") && asked[1].Contains("named \"Plex Media Server\"") && asked[1].Contains("anything on your network that names its forward the same way is ignored too")
+                && closed.Count == 0 && vm.Forwards.Count == 3 && Store.LoadConfig().IgnoredForwards.Count == 0);
+
+            vm.Confirm = question => true;
+            routerSays = "the router refused (501: Action Failed)";
+            flagged.DenyCommand.Execute(null);
+            for (int i = 0; i < 100 && shown == null; i++) Thread.Sleep(50);
+            Check("if the router refuses, the forward stays listed and you are told why", closed.SequenceEqual(new[] { "TCP 17765" }) && shown != null && shown.Contains("The router refused (501: Action Failed).") && vm.Forwards.Count == 3 && Store.Load<List<string>>(Store.ForwardsPath).Count == 2);
+
+            routerSays = "";
+            flagged.DenyCommand.Execute(null);
+            for (int i = 0; i < 100 && vm.Forwards.Count == 3; i++) Thread.Sleep(50);
+            Check("Deny closes the port on the router and takes it off the list and the baseline", closed.Count == 2 && vm.Forwards.Count == 2 && !vm.Forwards.Any(f => f.Port == "TCP 17765") && !Store.Load<List<string>>(Store.ForwardsPath).Contains(plex2.Key)
+                && vm.Events.Any(e => e.RawMessage == "denied router forward TCP 17765 (Plex Media Server): closed on the router") && vm.FooterNote.StartsWith("CLOSED ON THE ROUTER"));
+
+            vm.Forwards.First(f => f.Port == "TCP 17764").IgnoreCommand.Execute(null);
+            for (int i = 0; i < 100 && vm.IgnoredForwardRules.Count == 0; i++) Thread.Sleep(50);
+            ForwardViewModel ignoredRow = vm.Forwards.First(f => f.Port == "TCP 17764");
+            Check("Ignore saves the rule, marks the forward, and lists it in Settings", Store.LoadConfig().IgnoredForwards.Count == 1 && ignoredRow.Ignored && !ignoredRow.CanIgnore && ignoredRow.Description.EndsWith("(IGNORED)") && vm.HasIgnoredForwards
+                && vm.IgnoredForwardRules[0].Name == "PLEX MEDIA SERVER" && vm.IgnoredForwardRules[0].Detail.Contains("FROM ANY DEVICE") && vm.Events.Any(e => e.RawMessage == "now ignoring router forwards named Plex Media Server"));
+
+            vm.IgnoredForwardRules[0].ActionCommand.Execute(null);
+            for (int i = 0; i < 100 && vm.IgnoredForwardRules.Count > 0; i++) Thread.Sleep(50);
+            Check("Stop ignoring removes the rule again", Store.LoadConfig().IgnoredForwards.Count == 0 && !vm.HasIgnoredForwards && vm.Forwards.First(f => f.Port == "TCP 17764").CanIgnore);
+        }
+        finally
+        {
+            Upnp.Deleter = realDeleter;
         }
     }
 }

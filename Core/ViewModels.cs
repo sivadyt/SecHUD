@@ -289,6 +289,15 @@ namespace SecHUD
     /// <summary>One line in Settings under Ignored programs: either a program already ignored, or one that could be.</summary>
     public class ProgramViewModel
     {
+        /// <summary>A line that is not a program file: a name, a detail, and what its button does.</summary>
+        public ProgramViewModel(string name, string detail, Action action)
+        {
+            Path = "";
+            Name = (name ?? "").ToUpperInvariant();
+            Detail = detail ?? "";
+            ActionCommand = new RelayCommand(o => action());
+        }
+
         public ProgramViewModel(string path, string detail, Action<string> action)
         {
             Path = path ?? "";
@@ -331,12 +340,27 @@ namespace SecHUD
         public ForwardViewModel(MainViewModel owner)
         {
             ApproveCommand = new RelayCommand(o => owner.ApproveForward(this));
+            DenyCommand = new RelayCommand(o => owner.DenyForward(this));
+            IgnoreCommand = new RelayCommand(o => owner.IgnoreForward(this));
         }
+
+        /// <summary>Asks the router to close this forward (after asking you).</summary>
+        public ICommand DenyCommand { get; private set; }
+        /// <summary>Stops flagging forwards with this name.</summary>
+        public ICommand IgnoreCommand { get; private set; }
 
         public string Key { get; set; }
         public string Port { get; set; }
         public string Target { get; set; }
         public string Description { get; set; }
+
+        /// <summary>The forward exactly as the router reported it.</summary>
+        public ForwardInfo Info { get; set; }
+        public bool Ignored { get; set; }
+        /// <summary>A forward can only be ignored by its name, so one without a name cannot be.</summary>
+        public bool CanIgnore { get { return !Ignored && Info != null && !string.IsNullOrWhiteSpace(Info.Description); } }
+        public bool CanIgnoreFlagged { get { return CanIgnore && IsNew; } }
+        public bool CanIgnoreQuiet { get { return CanIgnore && !IsNew; } }
     }
 
     public class EventViewModel : Observable
@@ -503,6 +527,7 @@ namespace SecHUD
             UptimeRows = new ObservableCollection<RowViewModel>();
             Removed = new ObservableCollection<RemovedViewModel>();
             IgnoredPrograms = new ObservableCollection<ProgramViewModel>();
+            IgnoredForwardRules = new ObservableCollection<ProgramViewModel>();
             ListeningPrograms = new ObservableCollection<ProgramViewModel>();
 
             ScanCommand = new RelayCommand(o => { var ignored = ScanAsync(false); });
@@ -542,6 +567,9 @@ namespace SecHUD
         public ObservableCollection<ProgramViewModel> IgnoredPrograms { get; private set; }
         /// <summary>Programs with a port open right now that are not ignored yet. Each has an Ignore button in Settings.</summary>
         public ObservableCollection<ProgramViewModel> ListeningPrograms { get; private set; }
+        /// <summary>Router forwards that are ignored by name. Each has a Stop ignoring button in Settings.</summary>
+        public ObservableCollection<ProgramViewModel> IgnoredForwardRules { get; private set; }
+        public bool HasIgnoredForwards { get { return IgnoredForwardRules.Count > 0; } }
         public bool NoIgnoredPrograms { get { return IgnoredPrograms.Count == 0; } }
         public bool NoListeningPrograms { get { return ListeningPrograms.Count == 0; } }
 
@@ -1065,6 +1093,7 @@ namespace SecHUD
         /// <summary>Scans now, or right after the scan that is already running.</summary>
         private void RequestScan()
         {
+            if (!loopsStarted) return; // nothing scans until the app has been started (and never inside the tests)
             if (IsScanning) rescanRequested = true;
             else { var ignored = ScanAsync(false); }
         }
@@ -1216,16 +1245,110 @@ namespace SecHUD
             }
             RouterStatus = ("EXTERNAL ADDRESS " + (router.ExternalIp.Length > 0 ? router.ExternalIp : "UNKNOWN")
                 + "  |  " + router.Forwards.Count + " PORT FORWARD(S)").ToUpperInvariant();
-            foreach (ForwardInfo f in router.Forwards.OrderByDescending(x => x.IsNew).ThenBy(x => x.ExternalPort))
+            Func<ForwardInfo, bool> ignored = f => Scanner.MatchesForwardRule(config, f);
+            Func<ForwardInfo, bool> flagged = f => f.IsNew && !ignored(f);
+            foreach (ForwardInfo f in router.Forwards.OrderByDescending(flagged).ThenBy(x => x.ExternalPort))
             {
+                bool isIgnored = ignored(f);
                 Forwards.Add(new ForwardViewModel(this)
                 {
                     Key = f.Key,
+                    Info = f,
                     Port = f.Protocol + " " + f.ExternalPort,
-                    Target = f.InternalClient + ":" + f.InternalPort,
-                    Description = f.Description ?? "",
-                    IsNew = f.IsNew
+                    Target = f.TargetText.ToUpperInvariant(),
+                    Description = (f.Description ?? "") + (isIgnored ? "  (IGNORED)" : ""),
+                    Ignored = isIgnored,
+                    IsNew = flagged(f)
                 });
+            }
+        }
+
+        // ---- router forwards: deny and ignore ----
+
+        /// <summary>Deny: ask the router to close the forward, so the port is no longer open to the internet.</summary>
+        public async void DenyForward(ForwardViewModel forward)
+        {
+            if (forward == null || forward.Info == null) return;
+            ForwardInfo info = forward.Info;
+            string label = info.Protocol + " " + info.ExternalPort + (string.IsNullOrWhiteSpace(info.Description) ? "" : " (" + info.Description + ")");
+            string question = "Close this port on the router?\n\n" + label + "\n\n"
+                + "It stops being reachable from the internet. If the program that asked for it is still running it may ask again. "
+                + "To stop that for good, switch the feature off in the program itself (in Plex that is Settings, Remote Access).";
+            if (Confirm == null || !Confirm(question)) return;
+
+            try
+            {
+                string error = await Task.Run(() => Upnp.Deleter(info.Protocol, info.ExternalPort)) ?? "";
+                if (error.Length > 0)
+                {
+                    FooterNote = "NOT CLOSED: " + label.ToUpperInvariant();
+                    if (ShowMessage != null) ShowMessage("Could not close " + label + ".\n\n" + char.ToUpperInvariant(error[0]) + error.Substring(1) + ".");
+                    return;
+                }
+
+                // If it ever comes back it should be flagged again, so it leaves the baseline too.
+                await Task.Run(() => scanner.ForgetForward(info.Key));
+                if (lastResult != null && lastResult.Router != null) lastResult.Router.Forwards.Remove(info);
+                Forwards.Remove(forward);
+                FooterNote = "CLOSED ON THE ROUTER: " + label.ToUpperInvariant();
+                AddEvents(new List<EventEntry>
+                {
+                    new EventEntry { Ts = DateTime.Now.ToString("s"), Type = "deny", Severity = "info", Msg = "denied router forward " + label + ": closed on the router" }
+                });
+                RequestScan();
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("deny forward", ex);
+                if (ShowMessage != null) ShowMessage("Could not close " + label + ".\n\n" + ex.Message);
+            }
+        }
+
+        /// <summary>Ignore: forwards with this name are expected from now on.</summary>
+        public async void IgnoreForward(ForwardViewModel forward)
+        {
+            if (forward == null || !forward.CanIgnore) return;
+            ForwardRule rule = Scanner.RuleFor(forward.Info);
+            if (rule == null) return;
+            string question = "Ignore port forwards named \"" + rule.Description + "\"?\n\n"
+                + "A program names the forwards it asks the router for. From now on a new forward with this name"
+                + (rule.Client.Length > 0 ? ", going to " + rule.Client + "," : "") + " is accepted without an alert.\n\n"
+                + (rule.Client.Length > 0
+                    ? "A forward with another name, or one going to another device, is still flagged."
+                    : "Know the limit: the router takes the program's word for the name, and your router does not say which device asked. "
+                      + "So anything on your network that names its forward the same way is ignored too. A forward with any other name is still flagged.")
+                + "\n\nYou can undo this in Settings under Ignored programs.";
+            if (Confirm == null || !Confirm(question)) return;
+            await ChangeForwardRule(rule, true);
+        }
+
+        private async Task ChangeForwardRule(ForwardRule rule, bool ignore)
+        {
+            try
+            {
+                await Task.Run(() =>
+                {
+                    AppConfig updated = Store.LoadConfig();
+                    updated.IgnoredForwards.RemoveAll(r => string.Equals(r.Description, rule.Description, StringComparison.OrdinalIgnoreCase) && (r.Client ?? "") == (rule.Client ?? ""));
+                    if (ignore) updated.IgnoredForwards.Add(rule);
+                    updated.Normalize();
+                    Store.Save(Store.ConfigPath, updated);
+                });
+                config = Store.LoadConfig();
+                if (lastResult != null) ApplyRouter(lastResult.Router);
+                RefreshPrograms(lastResult == null ? new List<PortInfo>() : lastResult.Ports);
+                FooterNote = ((ignore ? "IGNORING FORWARDS NAMED: " : "NO LONGER IGNORING FORWARDS NAMED: ") + rule.Description).ToUpperInvariant();
+                AddEvents(new List<EventEntry>
+                {
+                    new EventEntry { Ts = DateTime.Now.ToString("s"), Type = "approve", Severity = "info",
+                        Msg = (ignore ? "now ignoring router forwards named " : "stopped ignoring router forwards named ") + rule.Description }
+                });
+                RequestScan(); // the router row and the overall status come from a full scan
+            }
+            catch (Exception ex)
+            {
+                Store.LogError("ignore forward", ex);
+                if (ShowMessage != null) ShowMessage("Could not save that.\n\n" + ex.Message);
             }
         }
 
@@ -1739,8 +1862,17 @@ namespace SecHUD
                 string detail = (numbers.Count == 1 ? "PORT " : "PORTS ") + string.Join(", ", numbers.Take(6)) + (numbers.Count > 6 ? " AND " + (numbers.Count - 6) + " MORE" : "");
                 ListeningPrograms.Add(new ProgramViewModel(group.Key, detail, path => IgnoreProgram(path, "")));
             }
+            IgnoredForwardRules.Clear();
+            foreach (ForwardRule rule in config.IgnoredForwards.OrderBy(r => r.Description, StringComparer.OrdinalIgnoreCase))
+            {
+                ForwardRule captured = rule;
+                IgnoredForwardRules.Add(new ProgramViewModel(rule.Description,
+                    string.IsNullOrEmpty(rule.Client) ? "ROUTER FORWARDS WITH THIS NAME, FROM ANY DEVICE" : "ROUTER FORWARDS WITH THIS NAME, GOING TO " + rule.Client,
+                    () => { var ignored = ChangeForwardRule(captured, false); }));
+            }
             Raise("NoIgnoredPrograms");
             Raise("NoListeningPrograms");
+            Raise("HasIgnoredForwards");
         }
 
         public void ApproveAutorun(AutorunViewModel item)

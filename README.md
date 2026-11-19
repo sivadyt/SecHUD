@@ -103,6 +103,20 @@ the name from another folder (a favourite trick of malware) is still flagged. St
 in the same place, undoes it. Everything else about that program is still watched: if it adds
 itself to startup, you still hear about it.
 
+### Router forwards
+
+Ignoring a program covers the ports it opens on this PC. A port it asks the *router* to open is
+a separate thing, listed on the Router tab, and each forward there has two more buttons:
+
+- **Deny** asks the router to close that port, so it stops being reachable from the internet.
+  If the program is still running it may ask again, so the lasting fix is to switch the feature
+  off in the program itself (in Plex: Settings, Remote Access). Some routers only let the device
+  that opened a forward close it, and SecHUD tells you when that happens.
+- **Ignore** stops flagging forwards with that name, for a program that asks for a new port
+  each time. Know the limit: the router takes each program's word for the name. When the router
+  also says which device a forward goes to, the rule is tied to that device. When it does not
+  (some answer 0.0.0.0), anything on your network using the same name is ignored too.
+
 ## Live watch
 
 A full scan runs every two minutes (you can change that). Between scans the live watch lets
@@ -330,7 +344,8 @@ Everything is plain JSON or text under `%LOCALAPPDATA%\SecHUD`:
 
 ARP requests on your own private subnet (never a public range, never more than 1022 addresses),
 a TCP connect to the hosts you list, a port check of a LAN device only when you click Ports, one
-UPnP search on the LAN and a few requests to your own router, and alerts to your Discord webhook
+UPnP search on the LAN and a few requests to your own router (including a request to close a
+forward when you press Deny on it), and alerts to your Discord webhook
 if you set one, plus one request a day to GitHub for the latest version number. Nothing else
 leaves your network. Exported reports leave out your public address.
 

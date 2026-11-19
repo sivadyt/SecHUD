@@ -69,6 +69,9 @@ namespace SecHUD
         /// </summary>
         [DataMember(Name = "trustedPrograms", Order = 31)] public List<string> TrustedPrograms { get; set; }
 
+        /// <summary>Router port forwards that are expected, by the name the program gave them.</summary>
+        [DataMember(Name = "ignoredForwards", Order = 32)] public List<ForwardRule> IgnoredForwards { get; set; }
+
         /// <summary>False until the first-run welcome has been answered.</summary>
         [DataMember(Name = "welcomed", Order = 27)] public bool Welcomed { get; set; }
 
@@ -122,6 +125,7 @@ namespace SecHUD
             GuestDays = 7;
             WeeklySummary = true;
             TrustedPrograms = new List<string>();
+            IgnoredForwards = new List<ForwardRule>();
         }
 
         public static AppConfig CreateDefault()
@@ -149,6 +153,10 @@ namespace SecHUD
             if (HomeWifiName == null) HomeWifiName = "";
             if (WatchMisses < 1 || WatchMisses > 20) WatchMisses = 2;
             if (GuestDays < 1 || GuestDays > 365) GuestDays = 7;
+            if (IgnoredForwards == null) IgnoredForwards = new List<ForwardRule>();
+            IgnoredForwards = IgnoredForwards.Where(r => r != null && !string.IsNullOrWhiteSpace(r.Description))
+                .Select(r => new ForwardRule { Description = r.Description.Trim(), Client = (r.Client ?? "").Trim() })
+                .GroupBy(r => r.Description.ToLowerInvariant() + "|" + r.Client).Select(g => g.First()).ToList();
             if (TrustedPrograms == null) TrustedPrograms = new List<string>();
             TrustedPrograms = TrustedPrograms.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim().Trim('"'))
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -352,14 +360,41 @@ namespace SecHUD
             get { return (Protocol ?? "") + "|" + ExternalPort + "|" + (InternalClient ?? "") + "|" + InternalPort; }
         }
 
+        /// <summary>True when a rule in Settings says forwards with this name are expected.</summary>
+        public bool Ignored { get; set; }
+
+        /// <summary>Some routers answer 0.0.0.0 here: they will not say which device a forward goes to.</summary>
+        public bool TargetHidden
+        {
+            get { return string.IsNullOrWhiteSpace(InternalClient) || InternalClient.Trim() == "0.0.0.0"; }
+        }
+
+        public string TargetText
+        {
+            get { return TargetHidden ? "not shown by the router" : InternalClient + ":" + InternalPort; }
+        }
+
         public string Summary
         {
             get
             {
-                string text = (Protocol ?? "") + " " + ExternalPort + " -> " + (InternalClient ?? "") + ":" + InternalPort;
-                return string.IsNullOrWhiteSpace(Description) ? text : text + " (" + Description + ")";
+                string name = string.IsNullOrWhiteSpace(Description) ? "" : " (" + Description + ")";
+                if (TargetHidden) return (Protocol ?? "") + " " + ExternalPort + name + ", the router does not say which device it goes to";
+                return (Protocol ?? "") + " " + ExternalPort + " -> " + InternalClient + ":" + InternalPort + name;
             }
         }
+    }
+
+    /// <summary>
+    /// "Forwards with this name are expected." A program names the forwards it asks the router
+    /// for, and one that picks a new port every time can only be recognised by that name.
+    /// </summary>
+    [DataContract]
+    public class ForwardRule
+    {
+        [DataMember(Name = "description", Order = 1)] public string Description { get; set; }
+        /// <summary>The device the forward must go to, when the router says. Empty means any.</summary>
+        [DataMember(Name = "client", Order = 2)] public string Client { get; set; }
     }
 
     public class RouterSnapshot

@@ -870,10 +870,39 @@ namespace SecHUD
             const string label = "ROUTER FORWARDS";
             if (!config.WatchRouter) return new CheckRow(label, "off", false, true);
             if (!router.Found) return new CheckRow(label, "no upnp", false, true);
-            return EvaluateForwards(router, approve, events, now, state.NewForwards);
+            return EvaluateForwards(router, approve, events, now, state.NewForwards, config);
         }
 
-        public static CheckRow EvaluateForwards(RouterSnapshot router, bool approve, List<EventEntry> events, DateTime now, List<string> alreadyReported)
+        /// <summary>True when Settings says forwards with this name are expected.</summary>
+        public static bool MatchesForwardRule(AppConfig config, ForwardInfo forward)
+        {
+            if (config == null || config.IgnoredForwards == null || forward == null || string.IsNullOrWhiteSpace(forward.Description)) return false;
+            string name = forward.Description.Trim();
+            return config.IgnoredForwards.Any(r => r != null
+                && string.Equals((r.Description ?? "").Trim(), name, StringComparison.OrdinalIgnoreCase)
+                && (string.IsNullOrEmpty(r.Client) || string.Equals(r.Client, (forward.InternalClient ?? "").Trim(), StringComparison.OrdinalIgnoreCase)));
+        }
+
+        /// <summary>The rule that would ignore this forward. It is tied to the device as well when the router says which one.</summary>
+        public static ForwardRule RuleFor(ForwardInfo forward)
+        {
+            if (forward == null || string.IsNullOrWhiteSpace(forward.Description)) return null;
+            return new ForwardRule { Description = forward.Description.Trim(), Client = forward.TargetHidden ? "" : forward.InternalClient.Trim() };
+        }
+
+        /// <summary>Takes a forward out of the baseline, so that if it ever comes back it is flagged again.</summary>
+        public void ForgetForward(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            lock (runLock)
+            {
+                List<string> known = Store.Load<List<string>>(Store.ForwardsPath);
+                if (known == null) return;
+                if (known.RemoveAll(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) > 0) Store.Save(Store.ForwardsPath, known);
+            }
+        }
+
+        public static CheckRow EvaluateForwards(RouterSnapshot router, bool approve, List<EventEntry> events, DateTime now, List<string> alreadyReported, AppConfig config = null)
         {
             const string label = "ROUTER FORWARDS";
             List<string> known = Store.Load<List<string>>(Store.ForwardsPath);
@@ -884,7 +913,8 @@ namespace SecHUD
                 AddEvent(events, now, "baseline", "info", "router baseline created with " + known.Count + " port forward(s)");
             }
 
-            List<ForwardInfo> fresh = router.Forwards.Where(f => !known.Contains(f.Key, StringComparer.OrdinalIgnoreCase)).ToList();
+            foreach (ForwardInfo f in router.Forwards) f.Ignored = MatchesForwardRule(config, f);
+            List<ForwardInfo> fresh = router.Forwards.Where(f => !f.Ignored && !known.Contains(f.Key, StringComparer.OrdinalIgnoreCase)).ToList();
             if (approve && fresh.Count > 0)
             {
                 known.AddRange(fresh.Select(f => f.Key));

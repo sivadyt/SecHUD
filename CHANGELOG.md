@@ -3,6 +3,16 @@
 The newest version is at the top. The text under each version is what people see in the app
 when an update is available.
 
+## 0.8.6
+
+- **Deny a router forward.** Every port forward on the Router tab has a Deny button. It asks
+  the router to close the port, so it is no longer reachable from the internet.
+- **Ignore a router forward by name.** A program such as Plex can ask the router for a new port
+  again and again. Press Ignore on one of its forwards and new ones with that name stop raising
+  alerts. Settings lists what is ignored, with Stop ignoring.
+- When a router will not say which device a forward goes to, the app now says so, where before
+  it showed 0.0.0.0:0.
+
 ## 0.8.5
 
 - Every program on the Ports tab now has an **Ignore program** button, not only flagged ones.

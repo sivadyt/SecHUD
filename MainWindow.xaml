@@ -275,7 +275,7 @@
                             <TextBlock Text="{Binding RouterStatus}" Style="{StaticResource StatusLine}" Margin="0,0,0,10"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Height="26">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="330"/></Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="FROM THE INTERNET" Style="{StaticResource HeaderText}"/><TextBlock Grid.Column="1" Text="GOES TO" Style="{StaticResource HeaderText}"/><TextBlock Grid.Column="2" Text="DESCRIPTION" Style="{StaticResource HeaderText}"/>
                         </Grid>
                         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -284,13 +284,16 @@
                                     <DataTemplate>
                                         <Border BorderBrush="{StaticResource AccentFaintBrush}" BorderThickness="0,1,0,0">
                                             <Grid MinHeight="32">
-                                                <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="330"/></Grid.ColumnDefinitions>
                                                 <TextBlock Grid.Column="0" Text="{Binding Port}" Style="{StaticResource CellText}" Foreground="{StaticResource CyanBrush}"/>
                                                 <TextBlock Grid.Column="1" Text="{Binding Target}" Style="{StaticResource CellText}"/>
                                                 <TextBlock Grid.Column="2" Text="{Binding Description}" Style="{StaticResource CellText}" Foreground="{StaticResource MutedBrush}" Margin="0,0,14,0"/>
                                                 <StackPanel Grid.Column="3" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0">
                                                     <TextBlock Text="{Binding Flag}" Style="{StaticResource PortFlagText}" Margin="0,0,10,0"/>
-                                                    <Button Style="{StaticResource HazardButton}" Content="APPROVE" Command="{Binding ApproveCommand}" ToolTip="This port forward is expected. Stop flagging it." Visibility="{Binding IsNew, Converter={StaticResource BoolToVis}}"/>
+                                                    <Button Style="{StaticResource HazardButton}" Content="APPROVE" Command="{Binding ApproveCommand}" ToolTip="This one port forward is expected. Stop flagging it." Visibility="{Binding IsNew, Converter={StaticResource BoolToVis}}"/>
+                                                    <Button Style="{StaticResource HazardButton}" Content="IGNORE" Margin="8,0,0,0" Command="{Binding IgnoreCommand}" ToolTip="Stop flagging every forward with this name, now and later. For a program that asks for a different port each time. You are asked first, and you can undo it in Settings." Visibility="{Binding CanIgnoreFlagged, Converter={StaticResource BoolToVis}}"/>
+                                                    <Button Style="{StaticResource QuietButton}" Content="IGNORE" Margin="8,0,0,0" Command="{Binding IgnoreCommand}" ToolTip="Stop flagging every forward with this name, now and later. You are asked first, and you can undo it in Settings." Visibility="{Binding CanIgnoreQuiet, Converter={StaticResource BoolToVis}}"/>
+                                                    <Button Style="{StaticResource DenyButton}" Content="DENY" Margin="8,0,0,0" Command="{Binding DenyCommand}" ToolTip="Ask the router to close this port, so it is no longer reachable from the internet. You are asked first."/>
                                                 </StackPanel>
                                             </Grid>
                                         </Border>
@@ -605,6 +608,24 @@
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
+
+                                <StackPanel Visibility="{Binding HasIgnoredForwards, Converter={StaticResource BoolToVis}}">
+                                    <TextBlock Text="IGNORED ROUTER FORWARDS" Style="{StaticResource HeaderText}" Margin="0,16,0,4"/>
+                                    <ItemsControl ItemsSource="{Binding IgnoredForwardRules}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border BorderBrush="{StaticResource AccentFaintBrush}" BorderThickness="0,1,0,0">
+                                                    <Grid MinHeight="32">
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="{Binding Name}" Style="{StaticResource CellText}" Foreground="{StaticResource CyanBrush}" Margin="0,0,12,0"/>
+                                                        <TextBlock Grid.Column="1" Text="{Binding Detail}" Style="{StaticResource CellText}" Foreground="{StaticResource MutedBrush}" Margin="0,0,12,0"/>
+                                                        <Button Grid.Column="2" Style="{StaticResource SmallButton}" Content="STOP IGNORING" VerticalAlignment="Center" Command="{Binding ActionCommand}" ToolTip="Flag new forwards with this name again."/>
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
 
                                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                                     <Button Style="{StaticResource SmallButton}" Content="ADD A PROGRAM..." Command="{Binding AddProgramCommand}" ToolTip="Browse to any program on this PC and ignore it, even if it is not running right now."/>
